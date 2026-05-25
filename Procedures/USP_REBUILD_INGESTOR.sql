@@ -1,234 +1,5 @@
 --==============================================================================================
 
--- Framework
-
---================================================================================================
-CREATE OR REPLACE PROCEDURE API_DATA_PIPELINE.METADATA.USP_UNIVERSAL_INGESTOR("API_TARGET" VARCHAR)
-RETURNS VARCHAR
-LANGUAGE PYTHON
-RUNTIME_VERSION = '3.10'
-PACKAGES = ('snowflake-snowpark-python','requests')
-HANDLER = 'main'
-EXTERNAL_ACCESS_INTEGRATIONS = (EAI_UNIVERSAL_INGESTOR)
-SECRETS = ()
-EXECUTE AS CALLER
-AS '
-import _snowflake
-import requests
-import json
-import hashlib
-import time
-
-def log_response(session, api_name, url, status_code, elapsed_sec, error_msg, retries):
-    session.sql(
-        "INSERT INTO API_DATA_PIPELINE.METADATA.INGESTION_RESPONSE_LOG "
-        "(API_NAME, API_URL, STATUS_CODE, RESPONSE_TIME_SECONDS, ERROR_MESSAGE_TEXT, RETRY_COUNT) "
-        "SELECT ?, ?, TRY_CAST(? AS NUMBER), TRY_CAST(? AS FLOAT), ?, TRY_CAST(? AS NUMBER)",
-        params=[
-            api_name or '''',
-            url or '''',
-            str(status_code) if status_code is not None else None,
-            str(elapsed_sec) if elapsed_sec is not None else None,
-            str(error_msg) if error_msg is not None else None,
-            str(retries) if retries is not None else None
-        ]
-    ).collect()
-
-def authenticate(auth_type, headers, cfg):
-    secret_alias = (cfg["SECRET_NAME"] or "").lower().strip()
-    if not secret_alias and auth_type != "NONE":
-        raise ValueError(f"SECRET_NAME not configured for auth_type={auth_type}")
-
-    if auth_type == "NONE":
-        return
-
-    elif auth_type == "API_KEY":
-        api_key = _snowflake.get_generic_secret_string(secret_alias)
-        header_name = cfg["API_KEY_HEADER"] or "X-Api-Key"
-        headers[header_name] = api_key
-
-    elif auth_type == "OAUTH2_BASIC":
-        creds = _snowflake.get_username_password(secret_alias)
-        token_payload = {
-            "grant_type": "client_credentials",
-            "client_id": creds.username,
-            "client_secret": creds.password
-        }
-        token_resp = requests.post(
-            cfg["TOKEN_URL"],
-            data=token_payload,
-            timeout=cfg["TIMEOUT_SEC"]
-        )
-        token_resp.raise_for_status()
-        token = token_resp.json().get("access_token")
-        if not token:
-            raise ValueError("No access_token in token response")
-        headers["Authorization"] = f"Bearer {token}"
-
-    elif auth_type == "OAUTH2_INTEGRATION":
-        token = _snowflake.get_oauth_access_token(secret_alias)
-        headers["Authorization"] = f"Bearer {token}"
-
-    else:
-        raise ValueError(f"Unknown auth_type: {auth_type}")
-
-def main(session, api_target):
-    cfg_res = session.sql(
-        "SELECT * FROM API_DATA_PIPELINE.METADATA.INGESTION_CONFIGS "
-        "WHERE API_NAME = ? AND ACTIVE_FLAG = TRUE",
-        params=[api_target]
-    ).collect()
-
-    if not cfg_res:
-        return f"Error: Configuration for ''{api_target}'' not found or inactive."
-
-    cfg = cfg_res[0]
-    headers = {"Accept": "application/json"}
-    auth_type = cfg["AUTH_TYPE"]
-    http_method = cfg["HTTP_METHOD"] or "GET"
-    max_retries = cfg["MAX_RETRIES"] or 6
-    retry_delay = cfg["RETRY_DELAY_SEC"] or 15
-    timeout = cfg["TIMEOUT_SEC"] or 30
-
-    landing_table = (cfg["LANDING_TABLE"] or "").strip()
-    if landing_table and landing_table.lower() not in ("none", "null"):
-        import re
-        if not re.match(r"^[A-Za-z_][A-Za-z0-9_.]*$", landing_table):
-            return f"Error: Invalid LANDING_TABLE name ''{landing_table}''"
-        if "." not in landing_table:
-            target_table = f"API_DATA_PIPELINE.RAW_LANDING.{landing_table}"
-        else:
-            target_table = landing_table
-        session.sql(
-            f"CREATE TABLE IF NOT EXISTS {target_table} ("
-            "INGEST_TS TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP(), "
-            "API_NAME VARCHAR, STATUS_CODE NUMBER, PAYLOAD VARIANT, "
-            "PAYLOAD_HASH VARCHAR, URL_ATTEMPTED VARCHAR)"
-        ).collect()
-    else:
-        target_table = "API_DATA_PIPELINE.RAW_LANDING.API_RAW_DATA"
-
-    try:
-        authenticate(auth_type, headers, cfg)
-    except Exception as e:
-        log_response(session, api_target, None, None, None, f"Auth failed: {str(e)}", 0)
-        return f"Authentication failed for ''{api_target}'': {str(e)}"
-
-    try:
-        extra_headers = (cfg["EXTRA_HEADERS_JSON"] or "").strip()
-        if extra_headers and extra_headers.lower() not in ("none", "null", "undefined"):
-            headers.update(json.loads(extra_headers))
-    except (KeyError, IndexError):
-        pass
-    except Exception as e:
-        return f"Error parsing EXTRA_HEADERS_JSON: {str(e)}"
-
-    page = cfg["START_INDEX"] or 1
-    pages_processed = 0
-
-    while True:
-        url = cfg["ENDPOINT_URL"]
-        pagination_type = cfg["PAGINATION_TYPE"] or "NONE"
-        connector = "&" if "?" in url else "?"
-
-        if pagination_type == "PAGE":
-            url = f"{url}{connector}{cfg[''PAGE_PARAM'']}={page}"
-        elif pagination_type == "OFFSET":
-            offset_val = (page - 1) * 100
-            url = f"{url}{connector}{cfg[''PAGE_PARAM'']}={offset_val}"
-
-        response = None
-        last_error = None
-        retries_used = 0
-        start_time = time.time()
-
-        for attempt in range(max_retries):
-            retries_used = attempt
-            try:
-                response = requests.request(
-                    method=http_method,
-                    url=url,
-                    headers=headers,
-                    timeout=timeout
-                )
-                if response.status_code == 200:
-                    break
-                last_error = f"HTTP {response.status_code}"
-            except Exception as ex:
-                last_error = str(ex)
-                response = None
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-
-        elapsed = round(time.time() - start_time, 3)
-        status = response.status_code if response else None
-
-        log_response(session, api_target, url, status, elapsed, last_error if status != 200 else None, retries_used)
-
-        if not response or response.status_code != 200:
-            return (
-                f"Error: ''{api_target}'' failed on page {page}. "
-                f"URL: {url} | Status: {status} | Last error: {last_error} | "
-                f"Pages ingested before failure: {pages_processed}"
-            )
-
-        payload = response.json()
-
-        data_to_split = []
-        if isinstance(payload, dict) and "data" in payload and isinstance(payload["data"], list):
-            data_to_split = payload["data"]
-        elif isinstance(payload, list):
-            data_to_split = payload
-        else:
-            data_to_split = [payload]
-
-        CHUNK_SIZE = 2500
-        total_chunks = max(1, (len(data_to_split) + CHUNK_SIZE - 1) // CHUNK_SIZE)
-
-        for i in range(0, len(data_to_split), CHUNK_SIZE):
-            chunk_index = (i // CHUNK_SIZE) + 1
-            chunk_data = data_to_split[i : i + CHUNK_SIZE]
-
-            chunk_payload = {
-                "data": chunk_data,
-                "_chunk_meta": {"page": page, "chunk": chunk_index, "total_chunks": total_chunks}
-            }
-
-            chunk_json = json.dumps(chunk_payload, sort_keys=True)
-            chunk_hash = hashlib.sha256(chunk_json.encode()).hexdigest()
-
-            exists = session.sql(
-                f"SELECT 1 FROM {target_table} WHERE PAYLOAD_HASH = ?",
-                params=[chunk_hash]
-            ).collect()
-
-            if not exists:
-                annotated_url = f"{url} [Chunk {chunk_index}/{total_chunks}]"
-                session.sql(
-                    f"INSERT INTO {target_table} "
-                    "(API_NAME, STATUS_CODE, PAYLOAD, PAYLOAD_HASH, URL_ATTEMPTED) "
-                    "SELECT ?, ?, PARSE_JSON(?), ?, ?",
-                    params=[api_target, response.status_code, chunk_json, chunk_hash, annotated_url]
-                ).collect()
-
-        pages_processed += 1
-
-        if pagination_type == "NONE":
-            break
-
-        if not data_to_split:
-            break
-
-        page += 1
-
-    return f"Success: ''{api_target}'' processed. {pages_processed} page(s) ingested."
-
-';
-
-
-
---==============================================================================================
-
 -- Wrapper
 
 --================================================================================================
@@ -273,19 +44,48 @@ def main(session):
         "import json\\n"
         "import hashlib\\n"
         "import time\\n"
+        "import urllib.parse as _urlparse\\n"
         "\\n"
-        "def log_response(session, api_name, url, status_code, elapsed_sec, error_msg, retries):\\n"
+        "def extract_field(obj, path):\\n"
+        "    if obj is None or not path:\\n"
+        "        return None\\n"
+        "    cur = obj\\n"
+        ''    for part in str(path).split("."):\\n''
+        "        if isinstance(cur, dict) and part in cur:\\n"
+        "            cur = cur[part]\\n"
+        "        else:\\n"
+        "            return None\\n"
+        "    return cur\\n"
+        "\\n"
+        "def compare_watermarks(a, b):\\n"
+        "    if a is None:\\n"
+        "        return b\\n"
+        "    if b is None:\\n"
+        "        return a\\n"
+        "    try:\\n"
+        "        af = float(a)\\n"
+        "        bf = float(b)\\n"
+        "        return a if af >= bf else b\\n"
+        "    except (TypeError, ValueError):\\n"
+        "        return a if str(a) >= str(b) else b\\n"
+        "\\n"
+        "def log_response(session, api_name, url, status_code, elapsed_sec, error_msg, retries, attempt_number=None, is_final_attempt=None, page_number=None):\\n"
         "    session.sql(\\n"
         ''        "INSERT INTO API_DATA_PIPELINE.METADATA.INGESTION_RESPONSE_LOG "\\n''
-        ''        "(API_NAME, API_URL, STATUS_CODE, RESPONSE_TIME_SECONDS, ERROR_MESSAGE_TEXT, RETRY_COUNT) "\\n''
-        ''        "SELECT ?, ?, TRY_CAST(? AS NUMBER), TRY_CAST(? AS FLOAT), ?, TRY_CAST(? AS NUMBER)",\\n''
+        ''        "(API_NAME, API_URL, STATUS_CODE, RESPONSE_TIME_SECONDS, ERROR_MESSAGE_TEXT, RETRY_COUNT, "\\n''
+        ''        "ATTEMPT_NUMBER, IS_FINAL_ATTEMPT, PAGE_NUMBER) "\\n''
+        ''        "SELECT ?, ?, TRY_CAST(? AS NUMBER), TRY_CAST(? AS FLOAT), ?, TRY_CAST(? AS NUMBER), "\\n''
+        ''        "TRY_CAST(? AS NUMBER), TRY_CAST(? AS BOOLEAN), TRY_CAST(? AS NUMBER)",\\n''
         "        params=[\\n"
         "            api_name or '''',\\n"
         "            url or '''',\\n"
         "            str(status_code) if status_code is not None else None,\\n"
         "            str(elapsed_sec) if elapsed_sec is not None else None,\\n"
         "            str(error_msg) if error_msg is not None else None,\\n"
-        "            str(retries) if retries is not None else None\\n"
+        "            str(retries) if retries is not None else None,\\n"
+        "            str(attempt_number) if attempt_number is not None else None,\\n"
+        "            str(is_final_attempt).lower() if is_final_attempt is not None else None,\\n"
+        "            str(page_number) if page_number is not None else None\\n"
         "        ]\\n"
         "    ).collect()\\n"
         "\\n"
@@ -381,10 +181,25 @@ def main(session):
         ''    page = cfg["START_INDEX"] or 1\\n''
         "    pages_processed = 0\\n"
         "\\n"
+        ''    try:\\n''
+        ''        _cfg_dict = cfg.asDict() if hasattr(cfg, "asDict") else dict(cfg)\\n''
+        ''    except Exception:\\n''
+        ''        _cfg_dict = {}\\n''
+        ''    incremental_flag = bool(_cfg_dict.get("INCREMENTAL_FLAG")) if "INCREMENTAL_FLAG" in _cfg_dict else False\\n''
+        ''    watermark_param = (_cfg_dict.get("WATERMARK_PARAM") or "").strip() if incremental_flag else ""\\n''
+        ''    watermark_field = (_cfg_dict.get("WATERMARK_FIELD") or "").strip() if incremental_flag else ""\\n''
+        ''    last_sync_value = (_cfg_dict.get("LAST_SYNC_VALUE") or "").strip() if incremental_flag else ""\\n''
+        "    new_watermark = last_sync_value or None\\n"
+        "\\n"
         "    while True:\\n"
         ''        url = cfg["ENDPOINT_URL"]\\n''
         ''        pagination_type = cfg["PAGINATION_TYPE"] or "NONE"\\n''
         ''        connector = "&" if "?" in url else "?"\\n''
+        "\\n"
+        "        if incremental_flag and watermark_param and last_sync_value:\\n"
+        "            encoded_wm = _urlparse.quote(str(last_sync_value))\\n"
+        ''            url = f"{url}{connector}{watermark_param}={encoded_wm}"\\n''
+        ''            connector = "&"\\n''
         "\\n"
         ''        if pagination_type == "PAGE":\\n''
         "            url = f\\"{url}{connector}{cfg[''PAGE_PARAM'']}={page}\\"\\n"
@@ -399,6 +214,9 @@ def main(session):
         "\\n"
         "        for attempt in range(max_retries):\\n"
         "            retries_used = attempt\\n"
+        "            attempt_status = None\\n"
+        "            attempt_error = None\\n"
+        "            attempt_start = time.time()\\n"
         "            try:\\n"
         "                response = requests.request(\\n"
         "                    method=http_method,\\n"
@@ -406,19 +224,39 @@ def main(session):
         "                    headers=headers,\\n"
         "                    timeout=timeout\\n"
         "                )\\n"
+        "                attempt_status = response.status_code\\n"
         "                if response.status_code == 200:\\n"
-        "                    break\\n"
-        ''                last_error = f"HTTP {response.status_code}"\\n''
+        "                    pass\\n"
+        "                else:\\n"
+        ''                    attempt_error = f"HTTP {response.status_code}"\\n''
+        "                    last_error = attempt_error\\n"
         "            except Exception as ex:\\n"
-        "                last_error = str(ex)\\n"
+        "                attempt_error = str(ex)\\n"
+        "                last_error = attempt_error\\n"
         "                response = None\\n"
+        "\\n"
+        "            attempt_elapsed = round(time.time() - attempt_start, 3)\\n"
+        "            is_final = (attempt_status == 200) or (attempt == max_retries - 1)\\n"
+        "\\n"
+        "            log_response(\\n"
+        "                session, api_target, url,\\n"
+        "                attempt_status, attempt_elapsed,\\n"
+        "                attempt_error,\\n"
+        "                attempt + 1,\\n"
+        "                attempt_number=attempt + 1,\\n"
+        "                is_final_attempt=is_final,\\n"
+        "                page_number=page\\n"
+        "            )\\n"
+        "\\n"
+        "            if attempt_status == 200:\\n"
+        "                break\\n"
         "            if attempt < max_retries - 1:\\n"
         "                time.sleep(retry_delay)\\n"
         "\\n"
         "        elapsed = round(time.time() - start_time, 3)\\n"
         "        status = response.status_code if response else None\\n"
         "\\n"
-        "        log_response(session, api_target, url, status, elapsed, last_error if status != 200 else None, retries_used)\\n"
+        "        # Per-attempt rows already logged inside the retry loop above.\\n"
         "\\n"
         "        if not response or response.status_code != 200:\\n"
         "            return (\\n"
@@ -439,6 +277,12 @@ def main(session):
         "\\n"
         "        CHUNK_SIZE = 2500\\n"
         "        total_chunks = max(1, (len(data_to_split) + CHUNK_SIZE - 1) // CHUNK_SIZE)\\n"
+        "\\n"
+        "        if incremental_flag and watermark_field:\\n"
+        "            for rec in data_to_split:\\n"
+        "                wm_val = extract_field(rec, watermark_field)\\n"
+        "                if wm_val is not None:\\n"
+        "                    new_watermark = compare_watermarks(new_watermark, wm_val)\\n"
         "\\n"
         "        for i in range(0, len(data_to_split), CHUNK_SIZE):\\n"
         "            chunk_index = (i // CHUNK_SIZE) + 1\\n"
@@ -476,7 +320,21 @@ def main(session):
         "\\n"
         "        page += 1\\n"
         "\\n"
-        "    return f\\"Success: ''{api_target}'' processed. {pages_processed} page(s) ingested.\\"\\n"
+        ''    if incremental_flag and new_watermark is not None and str(new_watermark) != str(last_sync_value or ""):\\n''
+        "        try:\\n"
+        "            session.sql(\\n"
+        ''                "UPDATE API_DATA_PIPELINE.METADATA.INGESTION_CONFIGS "\\n''
+        ''                "SET LAST_SYNC_VALUE = ? WHERE API_NAME = ?",\\n''
+        "                params=[str(new_watermark), api_target]\\n"
+        "            ).collect()\\n"
+        "        except Exception as _e:\\n"
+        ''            log_response(session, api_target, None, None, None, f"Watermark persist failed: {str(_e)}", 0)\\n''
+        "\\n"
+        ''    incremental_msg = ""\\n''
+        "    if incremental_flag:\\n"
+        "        incremental_msg = f\\" | Watermark: {last_sync_value or ''(none)''} -> {new_watermark or ''(unchanged)''}\\"\\n"
+        "\\n"
+        "    return f\\"Success: ''{api_target}'' processed. {pages_processed} page(s) ingested.{incremental_msg}\\"\\n"
     )
 
     ddl = (

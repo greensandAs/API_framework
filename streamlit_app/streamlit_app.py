@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import re
 import time
+import json
+from datetime import datetime
 
 st.set_page_config(page_title="API Data Extract", layout="wide")
 
@@ -256,6 +258,84 @@ def rebuild_eai():
     exec_sql(sql)
     return f"EAI rebuilt with {len(rules)} rule(s) and {len(secrets)} secret(s)"
 
+# ─────────────────────────────────────────────
+# Network Rule / URL Compatibility helpers
+# ─────────────────────────────────────────────
+from urllib.parse import urlparse as _nr_urlparse
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_allowed_hosts():
+    """Return a list of dicts: [{rule, entry, host, port}] aggregated from every
+    network rule in the METADATA schema. Used to validate ENDPOINT_URL against the EAI."""
+    out = []
+    try:
+        nr_df = run_query(f"SHOW NETWORK RULES IN SCHEMA {META}")
+        nr_df.columns = [c.upper() for c in nr_df.columns]
+    except Exception:
+        return out
+    if nr_df.empty:
+        return out
+    for _, r in nr_df.iterrows():
+        name = r.get("NAME")
+        if not name:
+            continue
+        try:
+            d = run_query(f"DESC NETWORK RULE {META}.{name}")
+            d.columns = [c.upper() for c in d.columns]
+            if "VALUE_LIST" in d.columns and not d.empty:
+                v = d["VALUE_LIST"].iloc[0]
+                if v:
+                    for x in str(v).split(","):
+                        x = x.strip()
+                        if not x:
+                            continue
+                        host, _, port = x.partition(":")
+                        out.append({
+                            "rule": str(name),
+                            "entry": x,
+                            "host": host.lower().strip(),
+                            "port": port.strip() if port else ""
+                        })
+        except Exception:
+            continue
+    return out
+
+def extract_url_host(url: str):
+    """Return (host_lower, port_str) parsed from a URL. Empty strings on failure."""
+    if not url:
+        return "", ""
+    try:
+        u = _nr_urlparse(url if "://" in url else f"https://{url}")
+        host = (u.hostname or "").lower()
+        port = str(u.port) if u.port else ""
+        return host, port
+    except Exception:
+        return "", ""
+
+def check_host_allowed(url: str, allowed_entries=None):
+    """Return (is_allowed: bool, matched_entry: str|None, reason: str).
+    Matches exact host, host:port, and *.suffix wildcards."""
+    if allowed_entries is None:
+        allowed_entries = get_allowed_hosts()
+    host, port = extract_url_host(url)
+    if not host:
+        return False, None, "Could not parse host from URL"
+    if not allowed_entries:
+        return False, None, "No network rules defined in METADATA schema"
+    for a in allowed_entries:
+        a_host = a["host"]
+        a_port = a["port"]
+        # exact host match
+        if a_host == host:
+            if not a_port or a_port == port or (not port and a_port in ("443", "80")):
+                return True, f"{a['entry']} (rule: {a['rule']})", "exact host match"
+        # wildcard prefix: *.domain.com matches anything ending with .domain.com
+        if a_host.startswith("*."):
+            suffix = a_host[1:]  # ".domain.com"
+            if host.endswith(suffix):
+                return True, f"{a['entry']} (rule: {a['rule']})", "wildcard match"
+    return False, None, f"Host '{host}' not covered by any network rule"
+
 @st.cache_data(ttl=60, show_spinner=False)
 def get_secrets_df():
     df = run_query(f"SHOW SECRETS IN SCHEMA {META}")
@@ -302,13 +382,14 @@ def active_pill(is_active):
 
 st.title("API Data Extract")
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "Manage API Configs",
     "Manage Secrets & EAI",
     "Run Ingestion",
     "Ingestion Console",
     "View Raw Data",
-    "Task Scheduler"
+    "Task Scheduler",
+    "Data Studio"
 ])
 
 # ─────────────────────────────────────────────
@@ -338,6 +419,39 @@ with tab1:
 
     styled_dataframe(configs)
 
+    st.markdown("<div style='height: 1.2rem;'></div>", unsafe_allow_html=True)
+
+    # ─── Compatibility Linter: flag any config whose ENDPOINT_URL host is not covered by a network rule
+    if not configs.empty and "ENDPOINT_URL" in configs.columns:
+        try:
+            allowed_entries = get_allowed_hosts()
+            mismatches = []
+            for _, crow in configs.iterrows():
+                url = crow.get("ENDPOINT_URL")
+                if not url or pd.isna(url):
+                    continue
+                ok, matched, reason = check_host_allowed(str(url), allowed_entries)
+                if not ok:
+                    host_p, _ = extract_url_host(str(url))
+                    mismatches.append({
+                        "API_NAME": crow.get("API_NAME"),
+                        "HOST": host_p or "(unparseable)",
+                        "ENDPOINT_URL": str(url),
+                        "REASON": reason,
+                    })
+            if mismatches:
+                with st.expander(
+                    f"⚠ Network Rule Compatibility — {len(mismatches)} config(s) have endpoints not covered by any network rule",
+                    expanded=False
+                ):
+                    st.caption(
+                        "These APIs will fail at runtime with a network access error until a matching network rule is added "
+                        "in the **Manage Secrets & EAI** tab."
+                    )
+                    styled_dataframe(pd.DataFrame(mismatches))
+        except Exception as _e:
+            st.caption(f"Compatibility linter unavailable: {str(_e)}")
+
     st.divider()
 
     with st.expander("New Endpoint", expanded=False):
@@ -355,13 +469,40 @@ with tab1:
             st.warning(f"'{api_name}' already exists. Choose a different name.")
 
         endpoint_url = st.text_input("ENDPOINT_URL", key=f"new_url_{fv}")
+
+        # Live network-rule coverage validation
+        url_allowed = True
+        url_match_reason = ""
+        if endpoint_url:
+            allowed_entries = get_allowed_hosts()
+            url_allowed, matched, reason = check_host_allowed(endpoint_url, allowed_entries)
+            if url_allowed:
+                st.caption(f"Host covered by network rule: `{matched}`")
+            else:
+                host_p, _ = extract_url_host(endpoint_url)
+                allowed_preview = ", ".join(sorted({a["entry"] for a in allowed_entries})[:8]) or "(none defined)"
+                st.warning(
+                    f"**Host not covered by any network rule.** {reason}.\n\n"
+                    f"Parsed host: `{host_p or '(unparseable)'}`\n\n"
+                    f"Allowed entries: `{allowed_preview}`\n\n"
+                    f"Add a rule in the **Manage Secrets & EAI** tab before saving, "
+                    f"or check 'Acknowledge gap' below to save anyway."
+                )
+                url_match_reason = reason
+
+        url_override = False
+        if endpoint_url and not url_allowed:
+            url_override = st.checkbox(
+                "Acknowledge gap — save without a matching network rule (config will fail at runtime until added)",
+                key=f"new_url_override_{fv}"
+            )
+
         http_method = st.selectbox("HTTP_METHOD", ["GET", "POST", "PUT", "DELETE"], key=f"new_method_{fv}")
 
         st.divider()
         auth_type = st.selectbox("AUTH_TYPE", ["NONE", "API_KEY", "OAUTH2_BASIC", "OAUTH2_INTEGRATION"], key=f"new_auth_{fv}")
 
         secret_opts = []
-        integration_opts = []
 
         try:
             sdf = get_secrets_df()
@@ -372,16 +513,7 @@ with tab1:
         except Exception as e:
             st.caption(f"Debug: secrets error: {e}")
 
-        try:
-            idf = get_integrations_df()
-            if not idf.empty:
-                if "TYPE" in idf.columns:
-                    integration_opts = idf[idf["TYPE"].str.contains("API_AUTHENTICATION", case=False, na=False)]["NAME"].tolist()
-        except Exception as e:
-            st.caption(f"Debug: integration error: {e}")
-
         secret_name = ""
-        integration_name = ""
         api_key_header = ""
         token_url = ""
         extra_headers = ""
@@ -408,11 +540,7 @@ with tab1:
             if secret_name == "+ Create Secret →":
                 st.info("No OAUTH2 secrets found. Go to **Manage Secrets & EAI** tab to create one.")
                 secret_name = ""
-            int_options = integration_opts if integration_opts else ["+ Create Integration →"]
-            integration_name = st.selectbox("INTEGRATION_NAME", [""] + int_options, key=f"new_int_name_{fv}")
-            if integration_name == "+ Create Integration →":
-                st.info("No API_AUTHENTICATION integrations found. Go to **Manage Secrets & EAI** tab to create one.")
-                integration_name = ""
+            st.caption("The OAuth2 integration is bound to the secret automatically — no separate selection needed.")
             extra_headers = st.text_input("EXTRA_HEADERS_JSON", placeholder='{"Client-Id": "abc123"}', key=f"new_headers_{fv}")
 
         st.divider()
@@ -451,6 +579,40 @@ with tab1:
             page_param = st.text_input("PAGE_PARAM", key=f"new_page_param_{fv}")
             start_index = st.number_input("START_INDEX", value=1, min_value=0, key=f"new_start_idx_{fv}")
 
+        st.divider()
+        section_label("INCREMENTAL SYNC")
+        incremental_flag = st.checkbox(
+            "Enable Incremental Sync (watermark-based)",
+            key=f"new_incr_flag_{fv}",
+            help="When enabled, the ingestor appends a watermark filter to the URL on each run and persists the highest value seen in the response."
+        )
+        watermark_param = ""
+        watermark_field = ""
+        last_sync_value = ""
+        if incremental_flag:
+            wm_c1, wm_c2 = st.columns(2)
+            with wm_c1:
+                watermark_param = st.text_input(
+                    "WATERMARK_PARAM",
+                    placeholder="since",
+                    key=f"new_wm_param_{fv}",
+                    help="Query-string parameter the API expects (e.g. 'since', 'modified_after', 'updated_after')."
+                )
+            with wm_c2:
+                watermark_field = st.text_input(
+                    "WATERMARK_FIELD",
+                    placeholder="updated_at",
+                    key=f"new_wm_field_{fv}",
+                    help="Dotted JSON path inside each record to read the new high-water mark from (e.g. 'updated_at' or 'meta.updated_at')."
+                )
+            last_sync_value = st.text_input(
+                "Initial LAST_SYNC_VALUE (optional)",
+                placeholder="2025-01-01T00:00:00Z",
+                key=f"new_wm_last_{fv}",
+                help="Seed value for the first run. Leave blank to fetch all data on the first run."
+            )
+
+        st.divider()
         c1, c2, c3 = st.columns(3)
         with c1:
             max_retries = st.number_input("MAX_RETRIES", value=6, min_value=1, key=f"new_retries_{fv}")
@@ -468,22 +630,32 @@ with tab1:
                 st.error("Invalid name. Use only letters, digits, and underscores.")
             elif landing_table and not re.match(r'^[A-Za-z_][A-Za-z0-9_.]*$', landing_table):
                 st.error("Invalid LANDING_TABLE name. Use only letters, digits, underscores, and dots for qualified names.")
+            elif endpoint_url and not url_allowed and not url_override:
+                st.error(
+                    f"ENDPOINT_URL host is not covered by any network rule ({url_match_reason}). "
+                    f"Add a rule in **Manage Secrets & EAI**, or tick the 'Acknowledge gap' checkbox to override."
+                )
             else:
                 try:
                     exec_sql(
                         f"INSERT INTO {META}.INGESTION_CONFIGS "
                         "(API_NAME, ENDPOINT_URL, HTTP_METHOD, AUTH_TYPE, API_KEY_HEADER, "
-                        "SECRET_NAME, INTEGRATION_NAME, TOKEN_URL, LANDING_TABLE, PAGINATION_TYPE, PAGE_PARAM, "
-                        "START_INDEX, MAX_RETRIES, RETRY_DELAY_SEC, TIMEOUT_SEC, EXTRA_HEADERS_JSON) "
-                        "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",
+                        "SECRET_NAME, TOKEN_URL, LANDING_TABLE, PAGINATION_TYPE, PAGE_PARAM, "
+                        "START_INDEX, MAX_RETRIES, RETRY_DELAY_SEC, TIMEOUT_SEC, EXTRA_HEADERS_JSON, "
+                        "INCREMENTAL_FLAG, WATERMARK_PARAM, WATERMARK_FIELD, LAST_SYNC_VALUE) "
+                        "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",
                         params=[
                             api_name, endpoint_url, http_method, auth_type,
                             api_key_header or None, secret_name or None,
-                            integration_name or None, token_url or None,
+                            token_url or None,
                             landing_table or None,
                             pagination_type, page_param or None,
                             start_index, max_retries, retry_delay, timeout_sec,
-                            extra_headers or None
+                            extra_headers or None,
+                            bool(incremental_flag),
+                            (watermark_param or None) if incremental_flag else None,
+                            (watermark_field or None) if incremental_flag else None,
+                            (last_sync_value or None) if incremental_flag else None,
                         ]
                     )
                     rebuild_msg = rebuild_ingestor()
@@ -540,6 +712,73 @@ with tab1:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Update failed: {str(e)}")
+
+            st.divider()
+
+            section_label("INCREMENTAL SYNC CONTROL")
+            current_inc = bool(row.get("INCREMENTAL_FLAG", False)) if "INCREMENTAL_FLAG" in row.index else False
+            current_param = row.get("WATERMARK_PARAM") if "WATERMARK_PARAM" in row.index else None
+            current_field = row.get("WATERMARK_FIELD") if "WATERMARK_FIELD" in row.index else None
+            current_lsv = row.get("LAST_SYNC_VALUE") if "LAST_SYNC_VALUE" in row.index else None
+            current_param = "" if pd.isna(current_param) else str(current_param or "")
+            current_field = "" if pd.isna(current_field) else str(current_field or "")
+            current_lsv = "" if pd.isna(current_lsv) else str(current_lsv or "")
+
+            if not current_inc:
+                st.caption(
+                    "Incremental sync is **disabled** for this API. Enable by recreating the config "
+                    "with the Incremental Sync option, or run: "
+                    f"`UPDATE {META}.INGESTION_CONFIGS SET INCREMENTAL_FLAG = TRUE, "
+                    "WATERMARK_PARAM = '<param>', WATERMARK_FIELD = '<field>' "
+                    f"WHERE API_NAME = '{selected_api}'`"
+                )
+            else:
+                wm_info_c1, wm_info_c2 = st.columns(2)
+                with wm_info_c1:
+                    st.caption(
+                        f"**Watermark Param:** `{current_param or '(unset)'}` &nbsp; "
+                        f"**Watermark Field:** `{current_field or '(unset)'}`",
+                        unsafe_allow_html=True
+                    )
+                with wm_info_c2:
+                    st.caption(f"**Current LAST_SYNC_VALUE:** `{current_lsv or '(none — next run is full load)'}`")
+
+                new_lsv = st.text_input(
+                    "Override LAST_SYNC_VALUE",
+                    value=current_lsv,
+                    placeholder="2025-01-01T00:00:00Z",
+                    key=f"upd_lsv_{selected_api}",
+                    help="Set a specific value to backfill from a chosen point in time. "
+                         "Leave blank and click 'Clear' to force a full reload on the next run."
+                )
+
+                bf_c1, bf_c2 = st.columns(2)
+                with bf_c1:
+                    if st.button("Apply Watermark", use_container_width=True, key="btn_apply_wm"):
+                        try:
+                            new_val = (new_lsv or "").strip()
+                            exec_sql(
+                                f"UPDATE {META}.INGESTION_CONFIGS SET LAST_SYNC_VALUE = ? WHERE API_NAME = ?",
+                                params=[new_val if new_val else None, selected_api]
+                            )
+                            display_val = new_val if new_val else "(NULL — full reload on next run)"
+                            st.success(f"Watermark for '{selected_api}' set to: {display_val}")
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Update failed: {str(e)}")
+                with bf_c2:
+                    if st.button("Clear (Full Backfill)", use_container_width=True, key="btn_clear_wm"):
+                        try:
+                            exec_sql(
+                                f"UPDATE {META}.INGESTION_CONFIGS SET LAST_SYNC_VALUE = NULL WHERE API_NAME = ?",
+                                params=[selected_api]
+                            )
+                            st.success(f"Cleared watermark for '{selected_api}'. Next run will fetch all data.")
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Clear failed: {str(e)}")
 
             st.divider()
 
@@ -1085,6 +1324,109 @@ with tab4:
             stitch_row(api_name, api_url or "—", status)
 
         st.divider()
+        section_label("RETRY DRILL-DOWN")
+        st.subheader("Pages That Required More Than One Attempt")
+        st.caption("Each retry attempt is logged individually. This panel shows pages where the framework had to retry — including transient errors that eventually succeeded.")
+
+        if "ATTEMPT_NUMBER" in logs.columns and "PAGE_NUMBER" in logs.columns:
+            # Identify pages with >1 attempt within the filtered window
+            try:
+                retry_summary = run_query(
+                    f"""
+                    WITH base AS (
+                        SELECT API_NAME, PAGE_NUMBER, ATTEMPT_NUMBER, STATUS_CODE,
+                               ERROR_MESSAGE_TEXT, RESPONSE_TIME_SECONDS, IS_FINAL_ATTEMPT,
+                               INSERT_DATETIME_UTC, API_URL
+                        FROM {META}.INGESTION_RESPONSE_LOG
+                        WHERE {where_sql}
+                          AND PAGE_NUMBER IS NOT NULL
+                          AND ATTEMPT_NUMBER IS NOT NULL
+                    ),
+                    grouped AS (
+                        SELECT API_NAME, PAGE_NUMBER,
+                               MIN(INSERT_DATETIME_UTC) AS RUN_STARTED_UTC,
+                               MAX(INSERT_DATETIME_UTC) AS RUN_ENDED_UTC,
+                               COUNT(*) AS ATTEMPTS,
+                               MAX(CASE WHEN IS_FINAL_ATTEMPT THEN STATUS_CODE END) AS FINAL_STATUS,
+                               MAX(CASE WHEN IS_FINAL_ATTEMPT AND STATUS_CODE = 200 THEN 'Recovered'
+                                        WHEN IS_FINAL_ATTEMPT THEN 'Exhausted'
+                                        ELSE NULL END) AS OUTCOME
+                        FROM base
+                        GROUP BY API_NAME, PAGE_NUMBER
+                        HAVING COUNT(*) > 1
+                    )
+                    SELECT API_NAME, PAGE_NUMBER, ATTEMPTS, FINAL_STATUS, OUTCOME,
+                           RUN_STARTED_UTC, RUN_ENDED_UTC
+                    FROM grouped
+                    ORDER BY RUN_STARTED_UTC DESC
+                    LIMIT 100
+                    """,
+                    params=filter_params if filter_params else None
+                )
+            except Exception as e:
+                retry_summary = pd.DataFrame()
+                st.caption(f"Drill-down unavailable: {str(e)}")
+
+            if retry_summary.empty:
+                st.info("No multi-attempt pages found in the current filter window. (Either no retries happened, or the schema migration hasn't been applied yet.)")
+            else:
+                rec_count = int((retry_summary["OUTCOME"] == "Recovered").sum()) if "OUTCOME" in retry_summary.columns else 0
+                exh_count = int((retry_summary["OUTCOME"] == "Exhausted").sum()) if "OUTCOME" in retry_summary.columns else 0
+                avg_attempts = retry_summary["ATTEMPTS"].mean() if "ATTEMPTS" in retry_summary.columns else 0
+
+                rm1, rm2, rm3 = st.columns(3)
+                with rm1:
+                    with st.container(border=True):
+                        st.metric("PAGES WITH RETRIES", len(retry_summary))
+                with rm2:
+                    with st.container(border=True):
+                        st.metric("RECOVERED", rec_count)
+                with rm3:
+                    with st.container(border=True):
+                        st.metric("EXHAUSTED (FAILED)", exh_count)
+
+                st.caption(f"Average attempts per retried page: **{avg_attempts:.2f}**")
+                styled_dataframe(retry_summary)
+
+                # Row picker for full attempt detail
+                retry_summary["LABEL"] = (
+                    retry_summary["API_NAME"].astype(str) + " — page " +
+                    retry_summary["PAGE_NUMBER"].astype(str) + " (" +
+                    retry_summary["ATTEMPTS"].astype(str) + " attempts, " +
+                    retry_summary["OUTCOME"].fillna("—").astype(str) + ")"
+                )
+                pick = st.selectbox(
+                    "Inspect attempt history for a specific page",
+                    [""] + retry_summary["LABEL"].tolist(),
+                    key="retry_pick"
+                )
+                if pick:
+                    sel_row = retry_summary[retry_summary["LABEL"] == pick].iloc[0]
+                    sel_api = sel_row["API_NAME"]
+                    sel_page = int(sel_row["PAGE_NUMBER"])
+                    try:
+                        attempts_df = run_query(
+                            f"SELECT ATTEMPT_NUMBER, IS_FINAL_ATTEMPT, STATUS_CODE, "
+                            f"RESPONSE_TIME_SECONDS, ERROR_MESSAGE_TEXT, INSERT_DATETIME_UTC, API_URL "
+                            f"FROM {META}.INGESTION_RESPONSE_LOG "
+                            f"WHERE API_NAME = ? AND PAGE_NUMBER = ? "
+                            f"ORDER BY ATTEMPT_NUMBER",
+                            params=[sel_api, sel_page]
+                        )
+                        if attempts_df.empty:
+                            st.info("No attempt rows found.")
+                        else:
+                            st.caption(
+                                f"**{len(attempts_df)} attempt(s)** for `{sel_api}` page `{sel_page}` — "
+                                f"final status: `{attempts_df.iloc[-1]['STATUS_CODE']}`"
+                            )
+                            styled_dataframe(attempts_df)
+                    except Exception as e:
+                        st.error(f"Could not load attempt history: {str(e)}")
+        else:
+            st.info("Per-attempt logging columns are not present yet. Apply the migration in `DDL/setup.sql` and redeploy `USP_REBUILD_INGESTOR` + `USP_UNIVERSAL_INGESTOR`.")
+
+        st.divider()
         section_label("FULL ARCHIVE")
         st.subheader("Log Details")
         styled_dataframe(logs)
@@ -1449,3 +1791,287 @@ with tab6:
     #                 st.success(f"{api}: {msg}")
     #         time.sleep(1)
     #         st.rerun()
+
+# ─────────────────────────────────────────────
+# TAB 7: Data Studio
+# ─────────────────────────────────────────────
+def _ds_infer_type(value):
+    if value is None:
+        return "STRING"
+    if isinstance(value, bool):
+        return "BOOLEAN"
+    if isinstance(value, int):
+        return "NUMBER"
+    if isinstance(value, float):
+        return "FLOAT"
+    if isinstance(value, str):
+        try:
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return "TIMESTAMP_TZ"
+        except Exception:
+            pass
+        return "STRING"
+    if isinstance(value, list):
+        return "ARRAY"
+    if isinstance(value, dict):
+        return "OBJECT"
+    return "VARIANT"
+
+def _ds_walk(obj, prefix=""):
+    """Yield (path, value) pairs for leaf scalars only; dicts recurse, arrays stop at top."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            new_prefix = f"{prefix}.{k}" if prefix else k
+            if isinstance(v, dict):
+                yield from _ds_walk(v, new_prefix)
+            else:
+                yield (new_prefix, v)
+    else:
+        yield (prefix, obj)
+
+def _ds_collect_records(payload, records_path):
+    """Extract list of records from a chunked payload by walking records_path."""
+    cur = payload
+    if records_path:
+        for part in records_path.split("."):
+            if isinstance(cur, dict) and part in cur:
+                cur = cur[part]
+            else:
+                return []
+    if isinstance(cur, list):
+        return cur
+    if isinstance(cur, dict):
+        return [cur]
+    return []
+
+def _ds_parse_payload(p):
+    if p is None:
+        return None
+    if isinstance(p, (dict, list)):
+        return p
+    try:
+        return json.loads(p)
+    except Exception:
+        return None
+
+with tab7:
+    section_label("DATA STUDIO")
+    st.header("Schema Discovery & View Generation")
+    st.caption("Inspect the JSON shape of landed records and one-click generate flattened SQL views.")
+
+    # Build list of landing tables (RAW_LANDING + any custom landing tables in configs)
+    try:
+        ls_tables = run_query(
+            f"SELECT TABLE_NAME FROM API_DATA_PIPELINE.INFORMATION_SCHEMA.TABLES "
+            f"WHERE TABLE_SCHEMA = 'RAW_LANDING' ORDER BY TABLE_NAME"
+        )
+        landing_tables = ls_tables["TABLE_NAME"].tolist() if not ls_tables.empty else ["API_RAW_DATA"]
+    except Exception:
+        landing_tables = ["API_RAW_DATA"]
+
+    ds_c1, ds_c2, ds_c3 = st.columns([2, 2, 1])
+    with ds_c1:
+        ds_table = st.selectbox("Landing Table", landing_tables, key="ds_table")
+    with ds_c2:
+        try:
+            ds_apis = run_query(f"SELECT DISTINCT API_NAME FROM {RAW}.{ds_table} ORDER BY API_NAME")
+            ds_api_options = ["All"] + (ds_apis["API_NAME"].tolist() if not ds_apis.empty else [])
+        except Exception:
+            ds_api_options = ["All"]
+        ds_api = st.selectbox("Filter by API", ds_api_options, key="ds_api")
+    with ds_c3:
+        ds_sample = st.number_input("Sample Size", min_value=10, max_value=2000, value=100, step=10, key="ds_sample")
+
+    ds_c4, ds_c5 = st.columns([2, 3])
+    with ds_c4:
+        ds_records_path = st.text_input(
+            "Records JSON Path",
+            value="data",
+            key="ds_records_path",
+            help="Dotted path inside PAYLOAD that holds the record array. Default 'data' matches the framework's chunking format. Leave blank if PAYLOAD itself is the record."
+        )
+    with ds_c5:
+        ds_view_name = st.text_input(
+            "Target View Name",
+            value=f"V_{ds_api}" if ds_api != "All" else f"V_{ds_table}_FLAT",
+            key="ds_view_name",
+            help="View will be created in API_DATA_PIPELINE.RAW_LANDING."
+        )
+
+    if st.button("Discover Schema", type="primary", key="btn_ds_discover"):
+        try:
+            where_clause = ""
+            params = []
+            if ds_api != "All":
+                where_clause = "WHERE API_NAME = ?"
+                params = [ds_api]
+            sample_df = run_query(
+                f"SELECT PAYLOAD FROM {RAW}.{ds_table} {where_clause} LIMIT {int(ds_sample)}",
+                params=params if params else None
+            )
+            if sample_df.empty:
+                st.warning("No rows returned for the selected filter.")
+            else:
+                # Aggregate schema across sampled records
+                path_types = {}
+                path_counts = {}
+                total_records = 0
+                for _, srow in sample_df.iterrows():
+                    payload = _ds_parse_payload(srow["PAYLOAD"])
+                    if payload is None:
+                        continue
+                    records = _ds_collect_records(payload, (ds_records_path or "").strip())
+                    for rec in records:
+                        total_records += 1
+                        for path, val in _ds_walk(rec):
+                            t = _ds_infer_type(val)
+                            path_types.setdefault(path, set()).add(t)
+                            path_counts[path] = path_counts.get(path, 0) + 1
+                if total_records == 0:
+                    st.warning(
+                        "Sample returned PAYLOADs but no records were found at the given path. "
+                        "Try clearing the 'Records JSON Path' field or checking the payload structure."
+                    )
+                else:
+                    schema_rows = []
+                    for path, types in sorted(path_types.items()):
+                        # Pick a single dominant type (prefer specific over STRING fallback)
+                        preferred_order = ["TIMESTAMP_TZ", "BOOLEAN", "NUMBER", "FLOAT", "OBJECT", "ARRAY", "STRING"]
+                        chosen = next((t for t in preferred_order if t in types), "VARIANT")
+                        coverage_pct = round(100.0 * path_counts[path] / total_records, 1)
+                        schema_rows.append({
+                            "PATH": path,
+                            "TYPE": chosen,
+                            "COVERAGE_%": coverage_pct,
+                            "OBSERVED_TYPES": ", ".join(sorted(types))
+                        })
+                    schema_df = pd.DataFrame(schema_rows)
+                    st.session_state["ds_schema_df"] = schema_df
+                    st.session_state["ds_schema_table"] = ds_table
+                    st.session_state["ds_schema_api"] = ds_api
+                    st.session_state["ds_schema_records_path"] = (ds_records_path or "").strip()
+                    st.session_state["ds_schema_total"] = total_records
+                    st.success(f"Discovered {len(schema_df)} field(s) across {total_records} record(s).")
+        except Exception as e:
+            st.error(f"Schema discovery failed: {str(e)}")
+
+    if "ds_schema_df" in st.session_state and not st.session_state["ds_schema_df"].empty:
+        st.divider()
+        section_label("DISCOVERED SCHEMA")
+
+        sch_df = st.session_state["ds_schema_df"]
+        m_c1, m_c2, m_c3 = st.columns(3)
+        with m_c1:
+            with st.container(border=True):
+                st.metric("FIELDS DETECTED", len(sch_df))
+        with m_c2:
+            with st.container(border=True):
+                st.metric("RECORDS SAMPLED", st.session_state.get("ds_schema_total", 0))
+        with m_c3:
+            with st.container(border=True):
+                full_coverage = int((sch_df["COVERAGE_%"] >= 99.9).sum())
+                st.metric("FIELDS WITH 100% COVERAGE", full_coverage)
+
+        styled_dataframe(sch_df)
+
+        # Quality Check panel
+        partial = sch_df[sch_df["COVERAGE_%"] < 100].copy()
+        if not partial.empty:
+            with st.expander("Quality Check — Fields with Partial Coverage", expanded=False):
+                st.caption(
+                    "Fields below appear in some — but not all — records of the sample. "
+                    "If a previously required field has dropped below 100%, the upstream API may have changed."
+                )
+                styled_dataframe(partial[["PATH", "TYPE", "COVERAGE_%"]])
+
+        st.divider()
+        section_label("GENERATE FLATTENED VIEW")
+
+        gen_c1, gen_c2 = st.columns([3, 1])
+        with gen_c1:
+            include_meta = st.checkbox(
+                "Include framework columns (INGEST_TS, API_NAME, STATUS_CODE, URL_ATTEMPTED)",
+                value=True,
+                key="ds_include_meta"
+            )
+        with gen_c2:
+            type_strategy = st.selectbox(
+                "Type Strategy",
+                ["Inferred", "All STRING (safe)"],
+                key="ds_type_strategy",
+                help="Inferred: cast to detected types. All STRING: cast everything to STRING (no cast errors)."
+            )
+
+        # Build CREATE VIEW DDL
+        type_map = {
+            "STRING": "STRING",
+            "NUMBER": "NUMBER",
+            "FLOAT": "FLOAT",
+            "BOOLEAN": "BOOLEAN",
+            "TIMESTAMP_TZ": "TIMESTAMP_TZ",
+            "OBJECT": "VARIANT",
+            "ARRAY": "ARRAY",
+            "VARIANT": "VARIANT",
+        }
+        cols_sql = []
+        if include_meta:
+            cols_sql.append("    base.INGEST_TS")
+            cols_sql.append("    base.API_NAME")
+            cols_sql.append("    base.STATUS_CODE")
+            cols_sql.append("    base.URL_ATTEMPTED")
+        for _, srow in sch_df.iterrows():
+            path = srow["PATH"]
+            type_alias = type_map.get(srow["TYPE"], "STRING") if type_strategy == "Inferred" else "STRING"
+            # Build PAYLOAD:data[*]:a:b accessor via FLATTEN value
+            access = "rec.value"
+            for part in path.split("."):
+                access += f":{part}"
+            col_alias = re.sub(r"[^A-Za-z0-9_]", "_", path).upper()
+            cols_sql.append(f"    {access}::{type_alias} AS {col_alias}")
+
+        records_path_used = st.session_state.get("ds_schema_records_path", "")
+        if records_path_used:
+            from_clause = (
+                f"FROM {RAW}.{st.session_state['ds_schema_table']} base,\n"
+                f"     LATERAL FLATTEN(input => base.PAYLOAD:{records_path_used}) rec"
+            )
+        else:
+            from_clause = (
+                f"FROM {RAW}.{st.session_state['ds_schema_table']} base,\n"
+                f"     LATERAL FLATTEN(input => base.PAYLOAD) rec"
+            )
+
+        api_filter = ""
+        if st.session_state.get("ds_schema_api", "All") != "All":
+            api_filter = f"\nWHERE base.API_NAME = '{escape_sql_literal(st.session_state['ds_schema_api'])}'"
+
+        safe_view_name = re.sub(r"[^A-Za-z0-9_]", "_", ds_view_name) if ds_view_name else "V_FLAT"
+        view_ddl = (
+            f"CREATE OR REPLACE VIEW {RAW}.{safe_view_name} AS\n"
+            f"SELECT\n"
+            + ",\n".join(cols_sql) + "\n"
+            + from_clause + api_filter
+        )
+
+        st.code(view_ddl, language="sql")
+
+        ddl_c1, ddl_c2 = st.columns(2)
+        with ddl_c1:
+            if st.button("Create / Replace View", type="primary", key="btn_ds_create_view"):
+                if not is_safe_name(safe_view_name):
+                    st.error("Invalid view name.")
+                else:
+                    try:
+                        exec_sql(view_ddl)
+                        st.success(f"View {RAW}.{safe_view_name} created.")
+                    except Exception as e:
+                        st.error(f"Create view failed: {str(e)}")
+        with ddl_c2:
+            st.download_button(
+                "Download DDL",
+                view_ddl,
+                file_name=f"{safe_view_name}.sql",
+                mime="text/sql",
+                use_container_width=True,
+                key="btn_ds_download_ddl"
+            )

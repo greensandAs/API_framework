@@ -2,3 +2,5 @@ Add a landing table column in the configuration table.
 --Restrict Manage secrets to Admin Users
 Split the payload into multiple entries if it exceeds 128MB
 Explore  on the scheduled run
+
+-- Done
