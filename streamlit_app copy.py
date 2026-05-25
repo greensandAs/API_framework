@@ -3,28 +3,9 @@ import pandas as pd
 import re
 import time
 import json
-import base64
 from datetime import datetime
-try:
-    import plotly.graph_objects as go
-    _PLOTLY_OK = True
-except Exception:
-    _PLOTLY_OK = False
 
-st.set_page_config(page_title="Tiger SnowSync", layout="wide", page_icon="🐅", initial_sidebar_state="expanded")
-
-# ─── Brand logo (rendered manually in the sidebar with full size control) ───
-@st.cache_data(show_spinner=False)
-def _load_logo_b64(path: str) -> str:
-    try:
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode("ascii")
-    except Exception:
-        return ""
-
-_LOGO_PATH = "Tiger_Snow_sync_logo.png"   # ships alongside streamlit_app.py
-_logo_b64 = _load_logo_b64(_LOGO_PATH)
-_logo_uri = f"data:image/png;base64,{_logo_b64}" if _logo_b64 else ""
+st.set_page_config(page_title="API Data Extract", layout="wide")
 
 st.markdown("""
 <style>
@@ -37,15 +18,15 @@ st.markdown("""
         --bg-hover: #161616;
         --border-subtle: #1f1f1f;
         --border-strong: #2e2e2e;
+        --border-active: rgba(0,220,130,0.3);
         --text-primary: #fafafa;
         --text-secondary: #a1a1aa;
         --text-muted: #52525b;
-        --accent-green: #29B5E8;
-        --accent-green-glow: rgba(41,181,232,0.08);
+        --accent-green: #00DC82;
+        --accent-green-glow: rgba(0,220,130,0.08);
         --accent-red: #ef4444;
-        --accent-blue: #29B5E8;
+        --accent-blue: #58a6ff;
         --accent-amber: #f59e0b;
-        --border-active: rgba(41,181,232,0.3);
         --space-1: 4px; --space-2: 8px; --space-3: 12px;
         --space-4: 16px; --space-6: 24px; --space-8: 32px;
         --font-display: 'Manrope', sans-serif;
@@ -54,14 +35,7 @@ st.markdown("""
         color-scheme: dark;
     }
 
-    .block-container {
-        padding-top: 0.6rem !important;
-        padding-bottom: 1rem !important;
-        padding-left: 1.5rem !important;
-        padding-right: 1.5rem !important;
-        max-width: 100% !important;
-        font-family: var(--font-body);
-    }
+    .block-container { padding-top: 0.6rem; padding-bottom: 1rem; max-width: 100%; font-family: var(--font-body); }
     html, body, [class*="css"] { font-family: var(--font-body); }
     .main .block-container { background: var(--bg-deep); }
 
@@ -232,11 +206,9 @@ st.markdown("""
        Datadog/Vercel-style metric tiles, config cards, chips
        ────────────────────────────────────────────────────────── */
     .dd-tile {
-        background: rgba(17,17,17,0.55);
-        backdrop-filter: blur(14px) saturate(150%);
-        -webkit-backdrop-filter: blur(14px) saturate(150%);
-        border: 1px solid rgba(255,255,255,0.06);
-        border-radius: 12px;
+        background: linear-gradient(180deg, #111111 0%, #0d0d0d 100%);
+        border: 1px solid var(--border-subtle);
+        border-radius: 10px;
         padding: 18px 20px;
         position: relative;
         overflow: hidden;
@@ -246,56 +218,11 @@ st.markdown("""
         flex-direction: column;
         justify-content: space-between;
     }
-    .dd-tile::after {
-        content: '';
-        position: absolute; inset: 0;
-        border-radius: inherit;
-        background: linear-gradient(135deg, rgba(255,255,255,0.04), transparent 60%);
-        pointer-events: none;
-    }
     .dd-tile:hover {
-        border-color: rgba(255,255,255,0.10);
+        border-color: var(--border-strong);
         transform: translateY(-1px);
-        box-shadow: 0 12px 32px rgba(0,220,130,0.06);
+        box-shadow: 0 8px 24px rgba(0,220,130,0.04);
     }
-    /* Status glow variants */
-    .dd-tile.glow-ok {
-        box-shadow: 0 0 0 1px rgba(41,181,232,0.18), 0 8px 24px rgba(41,181,232,0.06);
-    }
-    .dd-tile.glow-warn {
-        box-shadow: 0 0 0 1px rgba(245,158,11,0.22), 0 8px 24px rgba(245,158,11,0.07);
-        animation: dd-glow-warn 3.4s ease-in-out infinite;
-    }
-    .dd-tile.glow-err {
-        box-shadow: 0 0 0 1px rgba(239,68,68,0.25), 0 8px 24px rgba(239,68,68,0.08);
-        animation: dd-glow-err 2.8s ease-in-out infinite;
-    }
-    @keyframes dd-glow-warn {
-        0%,100% { box-shadow: 0 0 0 1px rgba(245,158,11,0.18), 0 8px 24px rgba(245,158,11,0.06); }
-        50%     { box-shadow: 0 0 0 1px rgba(245,158,11,0.38), 0 10px 32px rgba(245,158,11,0.14); }
-    }
-    @keyframes dd-glow-err {
-        0%,100% { box-shadow: 0 0 0 1px rgba(239,68,68,0.20), 0 8px 24px rgba(239,68,68,0.06); }
-        50%     { box-shadow: 0 0 0 1px rgba(239,68,68,0.45), 0 12px 36px rgba(239,68,68,0.18); }
-    }
-    /* Bento sizes */
-    .dd-tile.hero { min-height: 150px; padding: 22px 26px; }
-    .dd-tile.hero .value { font-size: 2.4rem; }
-    .dd-tile.hero .label { font-size: 0.7rem; }
-
-    /* Tile head row (label + status pill) */
-    .dd-tile .tile-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
-    .dd-tile .tile-pill {
-        font-family: var(--font-mono); font-size: 0.58rem; font-weight: 700;
-        padding: 2px 7px; border-radius: 4px;
-        letter-spacing: 0.6px; text-transform: uppercase;
-        background: rgba(255,255,255,0.04); color: var(--text-secondary);
-        border: 1px solid var(--border-subtle);
-        white-space: nowrap;
-    }
-    .dd-tile .tile-pill.ok   { background: var(--accent-green-glow); color: var(--accent-green); border-color: rgba(0,220,130,0.25); }
-    .dd-tile .tile-pill.warn { background: rgba(245,158,11,0.08); color: var(--accent-amber); border-color: rgba(245,158,11,0.25); }
-    .dd-tile .tile-pill.err  { background: rgba(239,68,68,0.08); color: var(--accent-red); border-color: rgba(239,68,68,0.30); }
     .dd-tile::before {
         content: '';
         position: absolute; top: 0; left: 0; right: 0; height: 1px;
@@ -311,9 +238,9 @@ st.markdown("""
         animation: dd-pulse 2s infinite;
     }
     @keyframes dd-pulse {
-        0%   { box-shadow: 0 0 0 0 rgba(41,181,232,0.7); }
-        70%  { box-shadow: 0 0 0 8px rgba(41,181,232,0); }
-        100% { box-shadow: 0 0 0 0 rgba(41,181,232,0); }
+        0%   { box-shadow: 0 0 0 0 rgba(0,220,130,0.7); }
+        70%  { box-shadow: 0 0 0 8px rgba(0,220,130,0); }
+        100% { box-shadow: 0 0 0 0 rgba(0,220,130,0); }
     }
     .dd-tile .label {
         font-family: var(--font-mono); font-size: 0.62rem; font-weight: 600;
@@ -392,8 +319,7 @@ st.markdown("""
         background: linear-gradient(180deg, rgba(10,10,10,0.95) 0%, rgba(10,10,10,0.85) 100%);
         backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
         border-bottom: 1px solid var(--border-subtle);
-        margin: -10px -1.5rem 18px -1.5rem;
-        padding: 12px 16px 12px 3.5rem;
+        padding: 12px 6px; margin: -8px 0 18px;
         display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
     }
     .topbar-brand { display: flex; align-items: center; gap: 12px; }
@@ -483,114 +409,6 @@ st.markdown("""
         border-radius: 8px !important;
         font-family: var(--font-mono) !important;
         font-size: 0.78rem !important;
-    }
-
-    /* Sidebar nav (Vercel/Linear style) */
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0a0a0a 0%, #0d0d0d 100%) !important;
-        border-right: 1px solid var(--border-subtle) !important;
-        padding-top: 14px;
-    }
-    section[data-testid="stSidebar"] [data-testid="stSidebarContent"] { padding: 18px 16px; }
-    section[data-testid="stSidebar"] .sb-brand {
-        display: flex; align-items: center; gap: 10px;
-        padding: 6px 8px 14px;
-        border-bottom: 1px solid var(--border-subtle);
-        margin-bottom: 14px;
-    }
-    section[data-testid="stSidebar"] .sb-brand-icon {
-        width: 30px; height: 30px; border-radius: 7px;
-        background: var(--accent-green-glow); border: 1px solid rgba(0,220,130,0.2);
-        display: inline-flex; align-items: center; justify-content: center; font-size: 1.05rem;
-    }
-    section[data-testid="stSidebar"] .sb-brand-name {
-        font-family: var(--font-display); font-weight: 800;
-        color: var(--text-primary); letter-spacing: -0.4px;
-        font-size: 0.98rem;
-    }
-    section[data-testid="stSidebar"] .sb-brand-sub {
-        font-family: var(--font-mono); font-size: 0.62rem;
-        color: var(--text-muted); letter-spacing: 0.5px; text-transform: uppercase;
-    }
-    /* Radio styled as nav list */
-    section[data-testid="stSidebar"] [role="radiogroup"] {
-        display: flex; flex-direction: column; gap: 2px;
-    }
-    section[data-testid="stSidebar"] [role="radiogroup"] label {
-        padding: 8px 12px; border-radius: 6px;
-        cursor: pointer; transition: all 0.12s;
-        font-family: var(--font-body); font-weight: 500;
-        font-size: 0.86rem;
-        color: var(--text-secondary) !important;
-        position: relative;
-    }
-    section[data-testid="stSidebar"] [role="radiogroup"] label:hover {
-        background: rgba(255,255,255,0.03);
-        color: var(--text-primary) !important;
-    }
-    section[data-testid="stSidebar"] [role="radiogroup"] label[data-checked="true"],
-    section[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked) {
-        background: var(--accent-green-glow);
-        color: var(--text-primary) !important;
-    }
-    section[data-testid="stSidebar"] [role="radiogroup"] label:has(input:checked)::before {
-        content: ''; position: absolute; left: 0; top: 8px; bottom: 8px; width: 2px;
-        background: var(--accent-green); border-radius: 2px;
-    }
-    /* Hide the radio circle */
-    section[data-testid="stSidebar"] [role="radiogroup"] label > div:first-child { display: none !important; }
-    section[data-testid="stSidebar"] .sb-footer {
-        margin-top: 24px; padding: 12px 8px;
-        border-top: 1px solid var(--border-subtle);
-        font-family: var(--font-mono); font-size: 0.66rem; color: var(--text-muted);
-    }
-    section[data-testid="stSidebar"] .sb-group {
-        font-family: var(--font-mono); font-size: 0.6rem; font-weight: 700;
-        color: var(--text-muted); letter-spacing: 1.4px; text-transform: uppercase;
-        padding: 14px 8px 6px; margin-top: 4px;
-    }
-    section[data-testid="stSidebar"] .sb-tagline {
-        font-family: var(--font-mono); font-size: 0.66rem; font-weight: 600;
-        color: var(--text-muted); letter-spacing: 0.8px;
-        padding: 4px 10px 12px; margin-top: -4px;
-        border-bottom: 1px solid var(--border-subtle);
-        margin-bottom: 4px;
-    }
-    section[data-testid="stSidebar"] .sb-logo {
-        padding: 8px 10px 4px;
-        text-align: center;
-    }
-    section[data-testid="stSidebar"] .sb-logo img {
-        width: 100%;
-        max-width: 220px;
-        height: auto;
-        display: block;
-        margin: 0 auto;
-        filter: drop-shadow(0 2px 8px rgba(0,0,0,0.4));
-    }
-
-    /* Sidebar: lock width for visual consistency (default scroll behaviour preserved) */
-    section[data-testid="stSidebar"] {
-        min-width: 260px !important;
-        max-width: 260px !important;
-    }
-
-    /* Hide the native white/gray header background so it doesn't clash with the sticky topbar */
-    [data-testid="stHeader"] {
-        background-color: transparent !important;
-    }
-    section[data-testid="stSidebar"] .stButton > button {
-        background: transparent !important; border: 1px solid transparent !important;
-        color: var(--text-secondary) !important;
-        text-align: left !important; justify-content: flex-start !important;
-        padding: 7px 12px !important; font-weight: 500 !important;
-        font-size: 0.86rem !important; font-family: var(--font-body) !important;
-        border-radius: 6px !important;
-    }
-    section[data-testid="stSidebar"] .stButton > button:hover {
-        background: rgba(255,255,255,0.03) !important;
-        color: var(--text-primary) !important;
-        border-color: transparent !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -808,17 +626,7 @@ def get_integrations_df():
 def section_label(text):
     st.markdown(f"<p class='section-label'>{text}</p>", unsafe_allow_html=True)
 
-def empty_state(icon, title, subtitle):
-    """Reusable illustrated empty-state card."""
-    st.markdown(f"""
-    <div style="background: var(--bg-card); border: 1px dashed var(--border-strong); border-radius: 10px; padding: 32px; text-align: center; margin: 18px 0;">
-        <div style="font-size: 2rem; margin-bottom: 8px;">{icon}</div>
-        <div style="font-family: var(--font-display); font-weight: 800; color: var(--text-primary); font-size: 1.05rem;">{title}</div>
-        <div style="color: var(--text-secondary); font-size: 0.82rem; margin-top: 6px;">{subtitle}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-def make_sparkline_svg(values, color="#29B5E8", width=200, height=28):
+def make_sparkline_svg(values, color="#00DC82", width=200, height=28):
     """Render a tiny SVG sparkline for inline embedding in dd-tile HTML."""
     if values is None or len(values) < 2:
         return ""
@@ -845,14 +653,9 @@ def make_sparkline_svg(values, color="#29B5E8", width=200, height=28):
         f"</svg>"
     )
 
-def dd_tile(label, value, delta=None, delta_dir="flat", live=False, spark_data=None, spark_color=None, size="default", glow=None, status_pill=None):
-    """Datadog/Vercel-style metric tile. status_pill: optional auto-derived from glow if None.
-    Pass status_pill='custom text' or status_pill=False to suppress."""
-    classes = ["dd-tile"]
-    if live: classes.append("live")
-    if size == "hero": classes.append("hero")
-    if glow in ("ok", "warn", "err"): classes.append(f"glow-{glow}")
-    cls = " ".join(classes)
+def dd_tile(label, value, delta=None, delta_dir="flat", live=False, spark_data=None, spark_color=None):
+    """Datadog/Vercel-style metric tile with optional inline sparkline."""
+    live_cls = " live" if live else ""
     pulse = "<span class='pulse'></span>" if live else ""
     delta_html = ""
     if delta:
@@ -860,31 +663,14 @@ def dd_tile(label, value, delta=None, delta_dir="flat", live=False, spark_data=N
         delta_html = f"<div class='delta {delta_dir}'>{arrow} {delta}</div>"
     spark_html = ""
     if spark_data is not None:
-        color_default = {"up": "#29B5E8", "down": "#ef4444", "flat": "#a1a1aa"}.get(delta_dir, "#29B5E8")
+        color_default = {"up": "#00DC82", "down": "#ef4444", "flat": "#a1a1aa"}.get(delta_dir, "#00DC82")
         color = spark_color or color_default
         svg = make_sparkline_svg(list(spark_data), color=color)
         if svg:
             spark_html = f"<div class='spark'>{svg}</div>"
-
-    # Auto-derive status pill from glow if not explicitly set
-    pill_html = ""
-    if status_pill is False:
-        pill_html = ""
-    elif status_pill:
-        pill_html = f"<span class='tile-pill'>{status_pill}</span>"
-    elif glow == "ok":
-        pill_html = "<span class='tile-pill ok'>ONLINE</span>"
-    elif glow == "warn":
-        pill_html = "<span class='tile-pill warn'>WARNING</span>"
-    elif glow == "err":
-        pill_html = "<span class='tile-pill err'>CRITICAL</span>"
-
     st.markdown(f"""
-    <div class='{cls}'>
-      <div class='tile-head'>
-        <div class='label'>{pulse}{label}</div>
-        {pill_html}
-      </div>
+    <div class='dd-tile{live_cls}'>
+      <div class='label'>{pulse}{label}</div>
       <div class='value'>{value}</div>
       {delta_html}
       {spark_html}
@@ -955,149 +741,39 @@ try:
 except Exception:
     _user, _role, _wh = "—", "—", "—"
 
-# ─── Sidebar Navigation ───
-NAV_GROUPS = [
-    ("SETUP", [
-        ("⚙   Configs",        "Manage API Configs"),
-        ("🔐  Secrets & EAI",   "Manage Secrets & EAI"),
-    ]),
-    ("EXECUTE", [
-        ("▶   Run Ingestion",   "Run Ingestion"),
-        ("📊  Console",         "Ingestion Console"),
-    ]),
-    ("EXPLORE", [
-        ("🗂   Data Explorer",   "Data Explorer"),
-        ("⏱   Scheduler",       "Task Scheduler"),
-    ]),
-]
-
-if "active_nav" not in st.session_state:
-    st.session_state["active_nav"] = "Manage API Configs"
-
-with st.sidebar:
-    if _logo_uri:
-        st.markdown(
-            f"<div class='sb-logo'><img src='{_logo_uri}' alt='Tiger SnowSync'></div>",
-            unsafe_allow_html=True
-        )
-    st.markdown(
-        "<div class='sb-tagline'>Accelerating the Data Den</div>",
-        unsafe_allow_html=True
-    )
-
-    for group_label, items in NAV_GROUPS:
-        st.markdown(f"<div class='sb-group'>{group_label}</div>", unsafe_allow_html=True)
-        for label, key in items:
-            is_active = st.session_state["active_nav"] == key
-            cls = " active" if is_active else ""
-            if st.button(label, key=f"nav_btn_{key}", use_container_width=True):
-                st.session_state["active_nav"] = key
-                st.rerun()
-
-    nav_choice = st.session_state["active_nav"]
-
-    # ─── Settings (cross-tab defaults) ───
-    st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
-    with st.expander("⚙  Settings", expanded=False):
-        try:
-            wh_df = run_query("SHOW WAREHOUSES")
-            wh_df.columns = [c.upper() for c in wh_df.columns]
-            wh_options = wh_df["NAME"].tolist() if not wh_df.empty else [_wh]
-        except Exception:
-            wh_options = [_wh]
-
-        if "pref_warehouse" not in st.session_state:
-            st.session_state["pref_warehouse"] = _wh if _wh in wh_options else (wh_options[0] if wh_options else "COMPUTE_WH")
-
-        st.selectbox("Default Warehouse (for new tasks)", wh_options, key="pref_warehouse")
-        st.number_input("Default Schema Sample Size", min_value=10, max_value=2000, step=10, value=100, key="pref_sample_size")
-        st.text_input("Default Landing Table", value="API_RAW_DATA", key="pref_landing_table")
-
-    st.markdown(f"""
-    <div class='sb-footer'>
-      <div>👤 {_user}</div>
-      <div>🛡 {_role}</div>
+st.markdown(f"""
+<div class='topbar'>
+  <div class='topbar-brand'>
+    <span class='topbar-icon'>⚡</span>
+    <div>
+      <span class='topbar-title'>API Pipeline</span>
+      <span class='topbar-sub'>Snowflake API Ingestion Framework</span>
     </div>
-    """, unsafe_allow_html=True)
+  </div>
+  <div class='topbar-meta'>
+    <span class='pill'>👤 {_user}</span>
+    <span class='pill'>🛡 {_role}</span>
+    <span class='pill accent'>🏢 {_wh}</span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-# ─── Sticky Topbar (page header) ───
-top_left, top_right = st.columns([5, 1])
-with top_left:
-    st.markdown(f"""
-    <div class='topbar'>
-      <div class='topbar-brand'>
-        <span class='topbar-icon'>🐅</span>
-        <div>
-          <span class='topbar-title'>{nav_choice}</span>
-          <span class='topbar-sub'>TIGER SNOWSYNC · NATIVE API ACCELERATOR</span>
-        </div>
-      </div>
-      <div class='topbar-meta'>
-        <span class='pill accent'>🏢 {_wh}</span>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-with top_right:
-    if st.button("🔄 Refresh", use_container_width=True, key="topbar_refresh"):
-        try:
-            get_secrets_df.clear()
-        except Exception:
-            pass
-        try:
-            get_integrations_df.clear()
-        except Exception:
-            pass
-        try:
-            get_allowed_hosts.clear()
-        except Exception:
-            pass
-        st.rerun()
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "Manage API Configs",
+    "Manage Secrets & EAI",
+    "Run Ingestion",
+    "Ingestion Console",
+    "Data Explorer",
+    "Task Scheduler"
+])
 
 # ─────────────────────────────────────────────
 # TAB 1: Manage API Configs
 # ─────────────────────────────────────────────
-if nav_choice == "Manage API Configs":
+with tab1:
     section_label("CONFIGURATION REGISTRY")
-    col_title, col_action = st.columns([4, 1])
-    with col_title:
-        st.header("API Configurations")
-        st.caption("Central registry for all managed API endpoints and their ingestion parameters.")
-    with col_action:
-        st.write("")
-        if "expand_new_endpoint" not in st.session_state:
-            st.session_state["expand_new_endpoint"] = False
-        if st.button("➕ New Endpoint", type="primary", use_container_width=True, key="header_new_endpoint"):
-            st.session_state["expand_new_endpoint"] = True
-            st.rerun()
-
-    with st.expander("🗺  Pipeline Overview", expanded=False):
-        st.caption("End-to-end data flow — every component you manage in this app.")
-        st.graphviz_chart(r"""
-        digraph G {
-          rankdir=LR;
-          bgcolor="transparent";
-          node  [style="filled,rounded", shape=box, fontname="Inter", fontsize=10,
-                 color="#1f1f1f", fillcolor="#111111", fontcolor="#fafafa", margin="0.18,0.10"];
-          edge  [color="#3a3a3a", fontcolor="#a1a1aa", fontname="JetBrains Mono", fontsize=9, penwidth=1.2];
-
-          cfg     [label="INGESTION_CONFIGS\n(metadata)",  fillcolor="#0f1f17", color="#00DC82", fontcolor="#00DC82"];
-          eai     [label="EAI + Secrets\n(network + auth)", fillcolor="#1a1408", color="#f59e0b", fontcolor="#f59e0b"];
-          proc    [label="USP_UNIVERSAL_INGESTOR\n(retry · paginate · watermark)", fillcolor="#0f0f1f", color="#58a6ff", fontcolor="#58a6ff"];
-          api     [label="External REST API",  fillcolor="#0a0a0a", color="#a1a1aa"];
-          raw     [label="RAW_LANDING.<TABLE>\n(JSON payloads)", fillcolor="#0f1f17", color="#00DC82", fontcolor="#00DC82"];
-          log     [label="INGESTION_RESPONSE_LOG\n(per-attempt audit)", fillcolor="#0f1f17", color="#00DC82", fontcolor="#00DC82"];
-          view    [label="V_<API> (flattened)\nData Explorer", fillcolor="#1c0a1a", color="#c084fc", fontcolor="#c084fc"];
-
-          cfg  -> proc [label="reads"];
-          eai  -> proc [label="grants"];
-          proc -> api  [label="HTTP"];
-          api  -> proc [label="JSON", style="dashed"];
-          proc -> raw  [label="dedup + write"];
-          proc -> log  [label="audit"];
-          proc -> cfg  [label="watermark", style="dashed", color="#58a6ff"];
-          raw  -> view [label="LATERAL FLATTEN"];
-        }
-        """)
+    st.header("API Configurations")
+    st.caption("Central registry for all managed API endpoints and their ingestion parameters.")
 
     configs = run_query(f"SELECT * FROM {META}.INGESTION_CONFIGS ORDER BY API_NAME")
 
@@ -1122,27 +798,13 @@ if nav_choice == "Manage API Configs":
         gap_count = len(network_gap_apis)
         incremental_count = int((configs.get("INCREMENTAL_FLAG", pd.Series(dtype=bool)) == True).sum()) if "INCREMENTAL_FLAG" in configs.columns else 0
 
-        # Status-aware glow keyed off overall health
-        overall_glow = "err" if gap_count > 0 else ("warn" if inactive_count > 0 else "ok")
-
-        # Hero tile (full width)
-        dd_tile("REGISTERED APIs", len(configs), f"{active_count} active · {gap_count} gap",
-                "up" if gap_count == 0 else "down", live=True, size="hero", glow=overall_glow)
-
-        # Balanced 2×2 grid below
-        row_a, row_b = st.columns(2), st.columns(2)
-        with row_a[0]:
-            dd_tile("ACTIVE", active_count, f"{inactive_count} inactive", "flat",
-                    glow="ok" if active_count else None)
-        with row_a[1]:
-            dd_tile("INCREMENTAL", incremental_count, f"of {len(configs)}", "flat")
-        with row_b[0]:
-            dd_tile("INACTIVE", inactive_count, "paused", "flat" if inactive_count == 0 else "down")
-        with row_b[1]:
+        m1, m2, m3, m4 = st.columns(4)
+        with m1: dd_tile("REGISTERED APIs", len(configs), live=True)
+        with m2: dd_tile("ACTIVE", active_count, f"{inactive_count} inactive", "flat")
+        with m3: dd_tile("INCREMENTAL", incremental_count, f"of {len(configs)}", "flat")
+        with m4:
             delta_dir = "down" if gap_count > 0 else "up"
-            dd_tile("NETWORK GAPS", gap_count,
-                    "needs network rule" if gap_count else "all hosts covered",
-                    delta_dir, glow="err" if gap_count else "ok")
+            dd_tile("NETWORK GAPS", gap_count, "needs rule" if gap_count else "all covered", delta_dir)
 
         st.markdown("<div style='height: 1.4rem;'></div>", unsafe_allow_html=True)
 
@@ -1264,40 +926,15 @@ if nav_choice == "Manage API Configs":
                     hov = [{"label": "status", "value": "never run"}]
 
                 cfg_card(name, endpoint, badges=badges, meta=meta, status=status, hover_stats=hov)
-
-                # Inline quick actions
-                qa1, qa2, qa3, _ = st.columns([1.1, 1, 1, 4])
-                with qa1:
-                    label = "Deactivate" if is_active else "Activate"
-                    if st.button(label, key=f"toggle_{name}", use_container_width=True):
-                        try:
-                            new_flag = not is_active
-                            exec_sql(
-                                f"UPDATE {META}.INGESTION_CONFIGS SET ACTIVE_FLAG = ? WHERE API_NAME = ?",
-                                params=[new_flag, name]
-                            )
-                            st.toast(f"{'Activated' if new_flag else 'Deactivated'} {name}", icon="✅" if new_flag else "⏸")
-                            time.sleep(0.4)
-                            st.rerun()
-                        except Exception as e:
-                            st.error(str(e))
-                with qa2:
-                    if is_active and st.button("▶ Run", key=f"run_{name}", use_container_width=True):
-                        try:
-                            with st.spinner(f"Ingesting {name}..."):
-                                result = run_query(f"CALL {META}.USP_UNIVERSAL_INGESTOR(?)", params=[name])
-                                msg = result.iloc[0, 0]
-                                icon = "✅" if "Success" in str(msg) else "⚠"
-                                st.toast(f"{name}: {msg[:80]}", icon=icon)
-                        except Exception as e:
-                            st.error(str(e))
-                with qa3:
-                    if st.button("📋", key=f"select_{name}", use_container_width=True, help="Open in Endpoint Control"):
-                        st.session_state["manage_api"] = name
-                        st.rerun()
     else:
-        empty_state("🪐", "No API configurations yet",
-                    "Open the <strong>New Endpoint</strong> expander below to register your first API.")
+        st.markdown(f"""
+        <div style="background: var(--bg-card); border: 1px dashed var(--border-strong); border-radius: 10px; padding: 32px; text-align: center; margin: 18px 0;">
+            <div style="font-size: 2rem; margin-bottom: 8px;">🪐</div>
+            <div style="font-family: var(--font-display); font-weight: 800; color: var(--text-primary); font-size: 1.05rem;">No API configurations yet</div>
+            <div style="color: var(--text-secondary); font-size: 0.82rem; margin-top: 6px;">Register your first API endpoint below to start ingesting.</div>
+            <div style="color: var(--text-muted); font-family: var(--font-mono); font-size: 0.7rem; margin-top: 14px;">▼ open <strong>New Endpoint</strong> below to begin</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     st.markdown("<div style='height: 1.2rem;'></div>", unsafe_allow_html=True)
 
@@ -1333,8 +970,7 @@ if nav_choice == "Manage API Configs":
 
     st.divider()
 
-    is_expanded = st.session_state.get("expand_new_endpoint", False)
-    with st.expander("Create New API Connection", expanded=is_expanded):
+    with st.expander("New Endpoint", expanded=False):
         section_label("NEW ENDPOINT")
         st.subheader("Add New API Config")
 
@@ -1342,192 +978,166 @@ if nav_choice == "Manage API Configs":
             st.session_state.form_version = 0
         fv = st.session_state.form_version
 
-        # ─── STEP 1 · CONNECTIVITY ─────────────────────────────────────────
-        st.markdown("#### 🌐  Step 1: Connectivity")
-        with st.container(border=True):
-            api_name = st.text_input("API_NAME (unique key)", key=f"new_api_name_{fv}")
+        api_name = st.text_input("API_NAME (unique key)", key=f"new_api_name_{fv}")
 
-            existing_apis = set(configs["API_NAME"].tolist()) if not configs.empty else set()
-            if api_name and api_name in existing_apis:
-                st.warning(f"'{api_name}' already exists. Choose a different name.")
+        existing_apis = set(configs["API_NAME"].tolist()) if not configs.empty else set()
+        if api_name and api_name in existing_apis:
+            st.warning(f"'{api_name}' already exists. Choose a different name.")
 
-            endpoint_url = st.text_input("ENDPOINT_URL", key=f"new_url_{fv}")
+        endpoint_url = st.text_input("ENDPOINT_URL", key=f"new_url_{fv}")
 
-            url_allowed = True
-            url_match_reason = ""
-            if endpoint_url:
-                allowed_entries = get_allowed_hosts()
-                url_allowed, matched, reason = check_host_allowed(endpoint_url, allowed_entries)
-                if url_allowed:
-                    st.caption(f"Host covered by network rule: `{matched}`")
-                else:
-                    host_p, _ = extract_url_host(endpoint_url)
-                    allowed_preview = ", ".join(sorted({a["entry"] for a in allowed_entries})[:8]) or "(none defined)"
-                    st.warning(
-                        f"**Host not covered by any network rule.** {reason}.\n\n"
-                        f"Parsed host: `{host_p or '(unparseable)'}`\n\n"
-                        f"Allowed entries: `{allowed_preview}`\n\n"
-                        f"Add a rule in the **Manage Secrets & EAI** tab before saving, "
-                        f"or check 'Acknowledge gap' below to save anyway."
-                    )
-                    url_match_reason = reason
-
-            url_override = False
-            if endpoint_url and not url_allowed:
-                url_override = st.checkbox(
-                    "Acknowledge gap — save without a matching network rule (config will fail at runtime until added)",
-                    key=f"new_url_override_{fv}"
-                )
-
-            http_method = st.selectbox("HTTP_METHOD", ["GET", "POST", "PUT", "DELETE"], key=f"new_method_{fv}")
-
-        st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-
-        # ─── STEP 2 · SECURITY ─────────────────────────────────────────────
-        st.markdown("#### 🔐  Step 2: Security & Authentication")
-        with st.container(border=True):
-            auth_type = st.selectbox("AUTH_TYPE", ["NONE", "API_KEY", "OAUTH2_BASIC", "OAUTH2_INTEGRATION"], key=f"new_auth_{fv}")
-
-            secret_opts = []
-            try:
-                sdf = get_secrets_df()
-                if not sdf.empty:
-                    type_map = {"API_KEY": "GENERIC_STRING", "OAUTH2_BASIC": "PASSWORD", "OAUTH2_INTEGRATION": "OAUTH2"}
-                    if auth_type in type_map and "SECRET_TYPE" in sdf.columns:
-                        secret_opts = sdf[sdf["SECRET_TYPE"] == type_map[auth_type]]["NAME"].tolist()
-            except Exception as e:
-                st.caption(f"Debug: secrets error: {e}")
-
-            secret_name = ""
-            api_key_header = ""
-            token_url = ""
-            extra_headers = ""
-
-            if auth_type == "API_KEY":
-                sk_options = secret_opts if secret_opts else ["+ Create Secret →"]
-                secret_name = st.selectbox("SECRET_NAME", [""] + sk_options, key=f"new_sk_apikey_{fv}")
-                if secret_name == "+ Create Secret →":
-                    st.info("No GENERIC_STRING secrets found. Go to **Manage Secrets & EAI** tab to create one.")
-                    secret_name = ""
-                api_key_header = st.text_input("API_KEY_HEADER", value="X-Api-Key", key=f"new_api_header_{fv}")
-
-            elif auth_type == "OAUTH2_BASIC":
-                sk_options = secret_opts if secret_opts else ["+ Create Secret →"]
-                secret_name = st.selectbox("SECRET_NAME", [""] + sk_options, key=f"new_sk_oauth_basic_{fv}")
-                if secret_name == "+ Create Secret →":
-                    st.info("No PASSWORD secrets found. Go to **Manage Secrets & EAI** tab to create one.")
-                    secret_name = ""
-                token_url = st.text_input("TOKEN_URL", key=f"new_token_url_{fv}")
-
-            elif auth_type == "OAUTH2_INTEGRATION":
-                sk_options = secret_opts if secret_opts else ["+ Create Secret →"]
-                secret_name = st.selectbox("SECRET_NAME", [""] + sk_options, key=f"new_sk_oauth_int_{fv}")
-                if secret_name == "+ Create Secret →":
-                    st.info("No OAUTH2 secrets found. Go to **Manage Secrets & EAI** tab to create one.")
-                    secret_name = ""
-                st.caption("The OAuth2 integration is bound to the secret automatically — no separate selection needed.")
-                extra_headers = st.text_input("EXTRA_HEADERS_JSON", placeholder='{"Client-Id": "abc123"}', key=f"new_headers_{fv}")
-
-        st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-
-        # ─── STEP 3 · DATA STRATEGY ────────────────────────────────────────
-        st.markdown("#### 📊  Step 3: Data Strategy")
-        with st.container(border=True):
-            landing_tables_list = []
-            try:
-                lt_df = run_query(
-                    f"SELECT TABLE_NAME FROM {DB}.INFORMATION_SCHEMA.TABLES "
-                    f"WHERE TABLE_SCHEMA = 'RAW_LANDING' ORDER BY TABLE_NAME"
-                )
-                if not lt_df.empty:
-                    landing_tables_list = lt_df["TABLE_NAME"].tolist()
-            except Exception:
-                pass
-
-            landing_options = ["(Default) API_RAW_DATA", "(New) Enter custom name..."] + [
-                f"{RAW}.{t}" for t in landing_tables_list
-            ]
-            landing_choice = st.selectbox("LANDING_TABLE", landing_options, key=f"new_table_select_{fv}")
-
-            if landing_choice.startswith("(New)"):
-                landing_table = st.text_input(
-                    "Custom Landing Table Name",
-                    placeholder="e.g. MY_NEW_TABLE",
-                    key=f"new_table_custom_{fv}"
-                )
-            elif landing_choice.startswith("(Default)"):
-                landing_table = ""
+        # Live network-rule coverage validation
+        url_allowed = True
+        url_match_reason = ""
+        if endpoint_url:
+            allowed_entries = get_allowed_hosts()
+            url_allowed, matched, reason = check_host_allowed(endpoint_url, allowed_entries)
+            if url_allowed:
+                st.caption(f"Host covered by network rule: `{matched}`")
             else:
-                landing_table = landing_choice
-
-            pagination_type = st.selectbox("PAGINATION_TYPE", ["NONE", "PAGE", "OFFSET"], key=f"new_pag_type_{fv}")
-            page_param = None
-            start_index = 1
-
-            if pagination_type != "NONE":
-                page_param = st.text_input("PAGE_PARAM", key=f"new_page_param_{fv}")
-                start_index = st.number_input("START_INDEX", value=1, min_value=0, key=f"new_start_idx_{fv}")
-
-            st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
-            section_label("INCREMENTAL SYNC")
-            incremental_flag = st.checkbox(
-                "Enable Incremental Sync (watermark-based)",
-                key=f"new_incr_flag_{fv}",
-                help="When enabled, the ingestor appends a watermark filter to the URL on each run and persists the highest value seen in the response."
-            )
-            watermark_param = ""
-            watermark_field = ""
-            last_sync_value = ""
-            if incremental_flag:
-                wm_c1, wm_c2 = st.columns(2)
-                with wm_c1:
-                    watermark_param = st.text_input(
-                        "WATERMARK_PARAM",
-                        placeholder="since",
-                        key=f"new_wm_param_{fv}",
-                        help="Query-string parameter the API expects (e.g. 'since', 'modified_after', 'updated_after')."
-                    )
-                with wm_c2:
-                    watermark_field = st.text_input(
-                        "WATERMARK_FIELD",
-                        placeholder="updated_at",
-                        key=f"new_wm_field_{fv}",
-                        help="Dotted JSON path inside each record to read the new high-water mark from (e.g. 'updated_at' or 'meta.updated_at')."
-                    )
-                last_sync_value = st.text_input(
-                    "Initial LAST_SYNC_VALUE (optional)",
-                    placeholder="2025-01-01T00:00:00Z",
-                    key=f"new_wm_last_{fv}",
-                    help="Seed value for the first run. Leave blank to fetch all data on the first run."
+                host_p, _ = extract_url_host(endpoint_url)
+                allowed_preview = ", ".join(sorted({a["entry"] for a in allowed_entries})[:8]) or "(none defined)"
+                st.warning(
+                    f"**Host not covered by any network rule.** {reason}.\n\n"
+                    f"Parsed host: `{host_p or '(unparseable)'}`\n\n"
+                    f"Allowed entries: `{allowed_preview}`\n\n"
+                    f"Add a rule in the **Manage Secrets & EAI** tab before saving, "
+                    f"or check 'Acknowledge gap' below to save anyway."
                 )
+                url_match_reason = reason
 
-        st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+        url_override = False
+        if endpoint_url and not url_allowed:
+            url_override = st.checkbox(
+                "Acknowledge gap — save without a matching network rule (config will fail at runtime until added)",
+                key=f"new_url_override_{fv}"
+            )
 
-        # ─── STEP 4 · RESILIENCE ───────────────────────────────────────────
-        st.markdown("#### 🛡  Step 4: Resilience Settings")
-        with st.container(border=True):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                max_retries = st.number_input("MAX_RETRIES", value=6, min_value=1, key=f"new_retries_{fv}")
-            with c2:
-                retry_delay = st.number_input("RETRY_DELAY", value=15, min_value=1, key=f"new_delay_{fv}")
-            with c3:
-                timeout_sec = st.number_input("TIMEOUT", value=30, min_value=5, key=f"new_timeout_{fv}")
+        http_method = st.selectbox("HTTP_METHOD", ["GET", "POST", "PUT", "DELETE"], key=f"new_method_{fv}")
 
-        st.markdown("<div style='height:18px;'></div>", unsafe_allow_html=True)
+        st.divider()
+        auth_type = st.selectbox("AUTH_TYPE", ["NONE", "API_KEY", "OAUTH2_BASIC", "OAUTH2_INTEGRATION"], key=f"new_auth_{fv}")
 
-        # ─── FORM ACTIONS ──────────────────────────────────────────────────
-        btn_col1, btn_col2, _ = st.columns([1.2, 1, 4])
+        secret_opts = []
 
-        with btn_col2:
-            if st.button("Cancel", type="secondary", use_container_width=True, key=f"cancel_new_{fv}"):
-                st.session_state["expand_new_endpoint"] = False
-                st.rerun()
+        try:
+            sdf = get_secrets_df()
+            if not sdf.empty:
+                type_map = {"API_KEY": "GENERIC_STRING", "OAUTH2_BASIC": "PASSWORD", "OAUTH2_INTEGRATION": "OAUTH2"}
+                if auth_type in type_map and "SECRET_TYPE" in sdf.columns:
+                    secret_opts = sdf[sdf["SECRET_TYPE"] == type_map[auth_type]]["NAME"].tolist()
+        except Exception as e:
+            st.caption(f"Debug: secrets error: {e}")
 
-        with btn_col1:
-            submit_clicked = st.button("Add Config", type="primary", use_container_width=True, key=f"submit_new_{fv}")
+        secret_name = ""
+        api_key_header = ""
+        token_url = ""
+        extra_headers = ""
 
-        if submit_clicked:
+        if auth_type == "API_KEY":
+            sk_options = secret_opts if secret_opts else ["+ Create Secret →"]
+            secret_name = st.selectbox("SECRET_NAME", [""] + sk_options, key=f"new_sk_apikey_{fv}")
+            if secret_name == "+ Create Secret →":
+                st.info("No GENERIC_STRING secrets found. Go to **Manage Secrets & EAI** tab to create one.")
+                secret_name = ""
+            api_key_header = st.text_input("API_KEY_HEADER", value="X-Api-Key", key=f"new_api_header_{fv}")
+
+        elif auth_type == "OAUTH2_BASIC":
+            sk_options = secret_opts if secret_opts else ["+ Create Secret →"]
+            secret_name = st.selectbox("SECRET_NAME", [""] + sk_options, key=f"new_sk_oauth_basic_{fv}")
+            if secret_name == "+ Create Secret →":
+                st.info("No PASSWORD secrets found. Go to **Manage Secrets & EAI** tab to create one.")
+                secret_name = ""
+            token_url = st.text_input("TOKEN_URL", key=f"new_token_url_{fv}")
+
+        elif auth_type == "OAUTH2_INTEGRATION":
+            sk_options = secret_opts if secret_opts else ["+ Create Secret →"]
+            secret_name = st.selectbox("SECRET_NAME", [""] + sk_options, key=f"new_sk_oauth_int_{fv}")
+            if secret_name == "+ Create Secret →":
+                st.info("No OAUTH2 secrets found. Go to **Manage Secrets & EAI** tab to create one.")
+                secret_name = ""
+            st.caption("The OAuth2 integration is bound to the secret automatically — no separate selection needed.")
+            extra_headers = st.text_input("EXTRA_HEADERS_JSON", placeholder='{"Client-Id": "abc123"}', key=f"new_headers_{fv}")
+
+        st.divider()
+        landing_tables_list = []
+        try:
+            lt_df = run_query(
+                f"SELECT TABLE_NAME FROM {DB}.INFORMATION_SCHEMA.TABLES "
+                f"WHERE TABLE_SCHEMA = 'RAW_LANDING' ORDER BY TABLE_NAME"
+            )
+            if not lt_df.empty:
+                landing_tables_list = lt_df["TABLE_NAME"].tolist()
+        except Exception:
+            pass
+
+        landing_options = ["(Default) API_RAW_DATA", "(New) Enter custom name..."] + [
+            f"{RAW}.{t}" for t in landing_tables_list
+        ]
+        landing_choice = st.selectbox("LANDING_TABLE", landing_options, key=f"new_table_select_{fv}")
+
+        if landing_choice.startswith("(New)"):
+            landing_table = st.text_input(
+                "Custom Landing Table Name",
+                placeholder="e.g. MY_NEW_TABLE",
+                key=f"new_table_custom_{fv}"
+            )
+        elif landing_choice.startswith("(Default)"):
+            landing_table = ""
+        else:
+            landing_table = landing_choice
+
+        pagination_type = st.selectbox("PAGINATION_TYPE", ["NONE", "PAGE", "OFFSET"], key=f"new_pag_type_{fv}")
+        page_param = None
+        start_index = 1
+
+        if pagination_type != "NONE":
+            page_param = st.text_input("PAGE_PARAM", key=f"new_page_param_{fv}")
+            start_index = st.number_input("START_INDEX", value=1, min_value=0, key=f"new_start_idx_{fv}")
+
+        st.divider()
+        section_label("INCREMENTAL SYNC")
+        incremental_flag = st.checkbox(
+            "Enable Incremental Sync (watermark-based)",
+            key=f"new_incr_flag_{fv}",
+            help="When enabled, the ingestor appends a watermark filter to the URL on each run and persists the highest value seen in the response."
+        )
+        watermark_param = ""
+        watermark_field = ""
+        last_sync_value = ""
+        if incremental_flag:
+            wm_c1, wm_c2 = st.columns(2)
+            with wm_c1:
+                watermark_param = st.text_input(
+                    "WATERMARK_PARAM",
+                    placeholder="since",
+                    key=f"new_wm_param_{fv}",
+                    help="Query-string parameter the API expects (e.g. 'since', 'modified_after', 'updated_after')."
+                )
+            with wm_c2:
+                watermark_field = st.text_input(
+                    "WATERMARK_FIELD",
+                    placeholder="updated_at",
+                    key=f"new_wm_field_{fv}",
+                    help="Dotted JSON path inside each record to read the new high-water mark from (e.g. 'updated_at' or 'meta.updated_at')."
+                )
+            last_sync_value = st.text_input(
+                "Initial LAST_SYNC_VALUE (optional)",
+                placeholder="2025-01-01T00:00:00Z",
+                key=f"new_wm_last_{fv}",
+                help="Seed value for the first run. Leave blank to fetch all data on the first run."
+            )
+
+        st.divider()
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            max_retries = st.number_input("MAX_RETRIES", value=6, min_value=1, key=f"new_retries_{fv}")
+        with c2:
+            retry_delay = st.number_input("RETRY_DELAY", value=15, min_value=1, key=f"new_delay_{fv}")
+        with c3:
+            timeout_sec = st.number_input("TIMEOUT", value=30, min_value=5, key=f"new_timeout_{fv}")
+
+        if st.button("Add Config", type="primary"):
             if not api_name:
                 st.error("API_NAME is required.")
             elif api_name in existing_apis:
@@ -1568,7 +1178,6 @@ if nav_choice == "Manage API Configs":
                     st.toast(f"Added '{api_name}' — {rebuild_msg}", icon="✅")
 
                     st.session_state.form_version += 1
-                    st.session_state["expand_new_endpoint"] = False
                     time.sleep(1)
                     st.rerun()
 
@@ -1750,27 +1359,16 @@ if nav_choice == "Manage API Configs":
             with col_delete:
                 st.markdown('<div class="danger-red">', unsafe_allow_html=True)
                 with st.popover("Delete Config", use_container_width=True):
-                    st.warning(f"Permanent delete for **{selected_api}**. This cannot be undone.")
-                    confirm_text = st.text_input(
-                        f'Type "{selected_api}" to confirm',
-                        key=f"delete_confirm_{selected_api}",
-                        placeholder=selected_api,
-                    )
-                    delete_armed = (confirm_text == selected_api)
+                    st.warning(f"Are you sure you want to permanently delete the configuration for **{selected_api}**? This cannot be undone.")
                     st.markdown('<div class="danger-red-confirm">', unsafe_allow_html=True)
-                    if st.button(
-                        "Yes, Delete Completely",
-                        use_container_width=True,
-                        key="btn_danger_delete_confirm",
-                        disabled=not delete_armed,
-                    ):
+                    if st.button("Yes, Delete Completely", use_container_width=True, key="btn_danger_delete_confirm"):
                         exec_sql(
                             f"DELETE FROM {META}.INGESTION_CONFIGS WHERE API_NAME = ?",
                             params=[selected_api]
                         )
                         rebuild_msg = rebuild_ingestor()
-                        st.toast(f"Deleted '{selected_api}' — {rebuild_msg}", icon="🗑")
-                        time.sleep(1.0)
+                        st.success(f"Deleted '{selected_api}' — {rebuild_msg}")
+                        time.sleep(1.5)
                         st.rerun()
                     st.markdown('</div>', unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
@@ -1780,7 +1378,7 @@ if nav_choice == "Manage API Configs":
 # ─────────────────────────────────────────────
 # TAB 2: Manage Secrets & EAI
 # ─────────────────────────────────────────────
-elif nav_choice == "Manage Secrets & EAI":
+with tab2:
     section_label("SECURITY INFRASTRUCTURE")
     st.header("Secrets & External Access")
     st.caption("Onboarding pipeline: Network Rules → Security Integrations → Secrets → EAI auto-rebuilds.")
@@ -2088,7 +1686,7 @@ elif nav_choice == "Manage Secrets & EAI":
 # ─────────────────────────────────────────────
 # TAB 3: Run Ingestion
 # ─────────────────────────────────────────────
-elif nav_choice == "Run Ingestion":
+with tab3:
     section_label("DATA HARVESTING")
     st.header("Run Ingestion")
     st.caption("Execute API synchronization for selected or all active endpoints.")
@@ -2105,35 +1703,22 @@ elif nav_choice == "Run Ingestion":
         if st.button("Run Ingestion"):
             if selected_apis:
                 progress = st.progress(0)
-                log_window = st.empty()
-                log_history = []
-
-                def _log(msg):
-                    log_history.append(msg)
-                    log_window.code("\n".join(log_history[-200:]), language="bash")
-
-                _log(f"$ ingest --apis {','.join(selected_apis)}")
-                _log(f"# {len(selected_apis)} target(s) queued")
-                _log("")
-
+                results_container = st.container()
                 for i, api in enumerate(selected_apis):
-                    _log(f"> [{i+1}/{len(selected_apis)}] initializing {api} ...")
-                    try:
-                        result = run_query(
-                            f"CALL {META}.USP_UNIVERSAL_INGESTOR(?)",
-                            params=[api]
-                        )
-                        msg = result.iloc[0, 0]
-                        if "Success" in msg:
-                            _log(f"  ✓ {api}  →  {msg}")
-                        else:
-                            _log(f"  ✗ {api}  →  {msg}")
-                    except Exception as e:
-                        _log(f"  ✗ {api}  →  ERROR: {str(e)}")
+                    with st.spinner(f"Ingesting {api}..."):
+                        try:
+                            result = run_query(
+                                f"CALL {META}.USP_UNIVERSAL_INGESTOR(?)",
+                                params=[api]
+                            )
+                            msg = result.iloc[0, 0]
+                            if "Success" in msg:
+                                results_container.success(f"{api}: {msg}")
+                            else:
+                                results_container.error(f"{api}: {msg}")
+                        except Exception as e:
+                            results_container.error(f"{api}: {str(e)}")
                     progress.progress((i + 1) / len(selected_apis))
-
-                _log("")
-                _log("$ done.")
             else:
                 st.warning("Select at least one API.")
     else:
@@ -2246,7 +1831,7 @@ elif nav_choice == "Run Ingestion":
 # ─────────────────────────────────────────────
 # TAB 4: Ingestion Console (Stitch Sentinel)
 # ─────────────────────────────────────────────
-elif nav_choice == "Ingestion Console":
+with tab4:
     section_label("SYSTEM TELEMETRY")
     st.header("Ingestion Console")
     st.caption("Global operational control for data synchronization and API harvesting.")
@@ -2326,22 +1911,7 @@ elif nav_choice == "Ingestion Console":
             section_label("DISTRIBUTION")
             st.subheader("Calls by API")
             api_counts = logs.groupby("API_NAME").size().reset_index(name="COUNT")
-            if _PLOTLY_OK and not api_counts.empty:
-                fig1 = go.Figure(go.Bar(
-                    x=api_counts["API_NAME"], y=api_counts["COUNT"],
-                    marker_color="#29B5E8", marker_line_width=0,
-                    hovertemplate="%{x}<br>%{y} calls<extra></extra>",
-                ))
-                fig1.update_layout(
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#0d0d0d",
-                    font=dict(color="#a1a1aa", family="JetBrains Mono", size=11),
-                    margin=dict(l=10, r=10, t=10, b=10), height=260,
-                    xaxis=dict(showgrid=False, tickfont=dict(size=10)),
-                    yaxis=dict(gridcolor="#1f1f1f", zerolinecolor="#1f1f1f"),
-                )
-                st.plotly_chart(fig1, use_container_width=True)
-            else:
-                st.bar_chart(api_counts.set_index("API_NAME"))
+            st.bar_chart(api_counts.set_index("API_NAME"))
 
         with chart_col2:
             section_label("STATUS CODES")
@@ -2350,24 +1920,7 @@ elif nav_choice == "Ingestion Console":
                 lambda x: str(int(x)) if pd.notna(x) else "ERROR"
             )
             status_counts = logs.groupby("STATUS_LABEL").size().reset_index(name="COUNT")
-            if _PLOTLY_OK and not status_counts.empty:
-                # Color OK vs error
-                colors = ["#29B5E8" if s == "200" else "#ef4444" for s in status_counts["STATUS_LABEL"]]
-                fig2 = go.Figure(go.Bar(
-                    x=status_counts["STATUS_LABEL"], y=status_counts["COUNT"],
-                    marker_color=colors, marker_line_width=0,
-                    hovertemplate="%{x}<br>%{y} calls<extra></extra>",
-                ))
-                fig2.update_layout(
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="#0d0d0d",
-                    font=dict(color="#a1a1aa", family="JetBrains Mono", size=11),
-                    margin=dict(l=10, r=10, t=10, b=10), height=260,
-                    xaxis=dict(showgrid=False, tickfont=dict(size=10)),
-                    yaxis=dict(gridcolor="#1f1f1f", zerolinecolor="#1f1f1f"),
-                )
-                st.plotly_chart(fig2, use_container_width=True)
-            else:
-                st.bar_chart(status_counts.set_index("STATUS_LABEL"))
+            st.bar_chart(status_counts.set_index("STATUS_LABEL"))
 
         st.divider()
 
@@ -2501,7 +2054,7 @@ elif nav_choice == "Ingestion Console":
 # ─────────────────────────────────────────────
 # TAB 5: View Raw Data
 # ─────────────────────────────────────────────
-elif nav_choice == "Data Explorer":
+with tab5:
     section_label("DATA EXPLORER")
     st.header("Browse, Discover, Model")
     st.caption("Inspect raw landed payloads and one-click generate flattened SQL views.")
@@ -2577,8 +2130,13 @@ elif nav_choice == "Data Explorer":
                     if not full.empty:
                         st.json(str(full["PAYLOAD"].iloc[0]))
         else:
-            empty_state("📭", "No raw data found",
-                        "Run an ingestion in the <strong>Run Ingestion</strong> tab, then come back here to inspect payloads.")
+            st.markdown("""
+            <div style="background: var(--bg-card); border: 1px dashed var(--border-strong); border-radius: 10px; padding: 28px; text-align: center; margin: 14px 0;">
+                <div style="font-size: 1.6rem; margin-bottom: 6px;">📭</div>
+                <div style="font-family: var(--font-display); font-weight: 800; color: var(--text-primary);">No raw data found</div>
+                <div style="color: var(--text-secondary); font-size: 0.78rem; margin-top: 6px;">Run an ingestion in the <strong>Run Ingestion</strong> tab, then come back here to inspect payloads.</div>
+            </div>
+            """, unsafe_allow_html=True)
 
     # ─── Inner Tab: Schema Discovery + View Generator ───
     with inner_schema:
@@ -2594,7 +2152,7 @@ elif nav_choice == "Data Explorer":
                 help="Dotted path inside PAYLOAD that holds the record array. Default 'data' matches the framework's chunking format. Leave blank if PAYLOAD itself is the record."
             )
         with sc_c2:
-            ds_sample = st.number_input("Sample Size", min_value=10, max_value=2000, value=int(st.session_state.get("pref_sample_size", 100)), step=10, key="ds_sample")
+            ds_sample = st.number_input("Sample Size", min_value=10, max_value=2000, value=100, step=10, key="ds_sample")
 
         default_view = f"V_{de_api}" if de_api != "All" else f"V_{de_table}_FLAT"
         ds_view_name = st.text_input(
@@ -2779,7 +2337,7 @@ elif nav_choice == "Data Explorer":
 # ─────────────────────────────────────────────
 # TAB 6: Task Scheduler
 # ─────────────────────────────────────────────
-elif nav_choice == "Task Scheduler":
+with tab6:
     section_label("AUTOMATION CONTROLS")
     st.header("Task Scheduler")
     st.caption("Manage Snowflake native tasks to automate API ingestion routines.")
@@ -2796,7 +2354,7 @@ elif nav_choice == "Task Scheduler":
             default_task_name = f"TASK_INGEST_{target_api}" if target_api else "TASK_INGEST_API"
             task_name = st.text_input("Task Name", value=default_task_name, key="sch_name")
 
-            task_wh = st.text_input("Warehouse", value=st.session_state.get("pref_warehouse", "COMPUTE_WH"), key="sch_wh")
+            task_wh = st.text_input("Warehouse", value="COMPUTE_WH", key="sch_wh")
 
             sched_suspend_after = st.number_input("Auto-suspend after N failures", min_value=0, value=0, key="sch_suspend", help="0 = never auto-suspend")
 
