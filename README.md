@@ -41,12 +41,14 @@ This Streamlit app is a management UI for a **config-driven API ingestion pipeli
 
 The API's hostname must be whitelisted for Snowflake to reach it.
 
-1. Go to **Tab 2 → Create Network Rule**
+1. Go to **Tab 2 → Step 1: Network Rules**
 2. Enter:
-   - **Network Rule Name**: `NR_EXAMPLE_API`
+   - **Rule Name**: `NR_EXAMPLE_API`
    - **Allowed Hosts**: `api.example.com` (or `*.example.com` for wildcard)
 3. Click **Create Network Rule**
 4. The **EAI is automatically rebuilt** — the new network rule is added to `EAI_UNIVERSAL_INGESTOR` along with all existing rules and secrets.
+
+> **Naming convention for security integrations**: any integration created via **Step 2: Security Integrations** must start with `SEC_INT_API_` (e.g. `SEC_INT_API_STRIPE`). The framework uses this prefix to filter out unrelated account-level integrations (Snowsight OAuth, SCIM, SSO, vendor integrations) from the dropdown shown in Step 3 OAUTH2 secret creation.
 
 ### Step 2: Create a Secret (Tab 2 — "Manage Secrets & EAI")
 
@@ -98,11 +100,10 @@ The API's hostname must be whitelisted for Snowflake to reach it.
 1. Go to **Tab 3**, select the API, click **Run Ingestion**.
 2. Watch the progress bar; the success message includes the watermark transition (e.g. `Watermark: 2025-01-01 → 2025-05-25`) when incremental is on.
 
-### Step 5: Verify (Tabs 4, 5, 7)
+### Step 5: Verify (Tabs 4, 5)
 
 - **Tab 4 (Ingestion Console)** — every retry attempt is logged individually; see **Retry Drill-Down** below.
-- **Tab 5 (View Raw Data)** — browse landed JSON.
-- **Tab 7 (Data Studio)** — discover schema and generate flattened views.
+- **Tab 5 (Data Explorer)** — browse landed JSON (Raw Payloads sub-tab) **and** discover schema / generate flattened views (Schema Discovery sub-tab) — both share the same landing-table + API filter.
 
 ### Step 6 (Optional): Schedule It (Tab 6 — "Task Scheduler")
 
@@ -142,15 +143,22 @@ In the **INCREMENTAL SYNC CONTROL** section under each API:
 
 ---
 
-## Data Studio (Tab 7)
+## Data Explorer (Tab 5)
 
+A single tab combining JSON browsing and schema modeling. Pick the **landing table** and **API filter** once at the top — both sub-tabs use them.
+
+### Sub-tab: Raw Payloads
+Read-only inspector. Adjust **Max rows** and **Show full payload** toggle.
+- Top-line metrics: records shown, total in table, distinct APIs.
+- Click any payload hash to expand the full JSON via **Payload Inspector**.
+- Use this to confirm ingestion happened, debug "did the data arrive?", and spot bad payloads.
+
+### Sub-tab: Schema Discovery
 Turn raw JSON into queryable columns.
 
-1. Pick a **Landing Table** (auto-discovered from `INFORMATION_SCHEMA`).
-2. Pick **Filter by API** and **Sample Size**.
-3. Set the **Records JSON Path** (default `data` matches the framework's chunked payload — leave blank if `PAYLOAD` itself is one record).
-4. Click **Discover Schema** — every record is walked, leaf paths collected, types inferred (`TIMESTAMP_TZ`, `NUMBER`, `BOOLEAN`, `STRING`, `FLOAT`, `OBJECT`, `ARRAY`).
-5. Review the schema table:
+1. Set the **Records JSON Path** (default `data` matches the framework's chunked payload — leave blank if `PAYLOAD` itself is one record) and **Sample Size**.
+2. Click **Discover Schema** — every record is walked, leaf paths collected, types inferred (`TIMESTAMP_TZ`, `NUMBER`, `BOOLEAN`, `STRING`, `FLOAT`, `OBJECT`, `ARRAY`).
+3. Review the schema table:
 
 | Column | Meaning |
 |---|---|
@@ -159,11 +167,11 @@ Turn raw JSON into queryable columns.
 | `COVERAGE_%` | % of sampled records that contain this field |
 | `OBSERVED_TYPES` | All types seen for this path |
 
-6. Use the **Quality Check** expander to spot fields with < 100% coverage (catches API drift / removed fields).
-7. Choose **Type Strategy**:
+4. Use the **Quality Check** expander to spot fields with < 100% coverage (catches API drift / removed fields).
+5. Choose **Type Strategy**:
    - **Inferred** — casts to detected types (faster downstream, riskier)
    - **All STRING (safe)** — never errors, cast as you query
-8. Click **Create / Replace View** — generates `LATERAL FLATTEN(input => PAYLOAD:<records_path>)` view, e.g.:
+6. Click **Create / Replace View** — generates `LATERAL FLATTEN(input => PAYLOAD:<records_path>)` view, e.g.:
 
 ```sql
 CREATE OR REPLACE VIEW API_DATA_PIPELINE.RAW_LANDING.V_EXAMPLE AS
@@ -175,7 +183,7 @@ FROM API_DATA_PIPELINE.RAW_LANDING.EXAMPLE_RAW base,
      LATERAL FLATTEN(input => base.PAYLOAD:data) rec;
 ```
 
-9. Or click **Download DDL** to save the SQL file.
+7. Or click **Download DDL** to save the SQL file.
 
 ---
 
@@ -245,9 +253,8 @@ Pagination stops when the response contains `{"data": []}` (empty data array).
 | **Manage Secrets & EAI** | View/create Snowflake secrets, security integrations, and network rules. EAI auto-rebuilds. |
 | **Run Ingestion** | Run selected APIs, run-all sequential, or run-all parallel via Snowflake Tasks. |
 | **Ingestion Console** | Filter logs by API/status, success rate, avg response time, error drill-down, and the **Retry Drill-Down** panel. |
-| **View Raw Data** | Browse landed JSON across all landing tables. |
+| **Data Explorer** | Two sub-tabs: **Raw Payloads** (inspector) + **Schema Discovery** (one-click flattened view generation + quality checks). Shared landing-table + API filter. |
 | **Task Scheduler** | Create/manage Snowflake Tasks; INTERVAL / CRON; resume/suspend/drop/run-now; execution telemetry. |
-| **Data Studio** | Schema discovery + one-click flattened view generation + quality checks. |
 
 ---
 
@@ -261,10 +268,10 @@ Pagination stops when the response contains `{"data": []}` (empty data array).
 | "Could not connect" / timeout | Hostname not in any network rule | Add network rule in Tab 2 (EAI auto-rebuilds). Check the **Compatibility Linter** in Tab 1. |
 | **Add Config blocked** | URL host not covered by any network rule | Add the rule first, or tick "Acknowledge gap" to override |
 | Duplicate data not appearing | Payload hash already exists (dedup working) | Expected — identical responses are skipped |
-| Watermark not advancing | `WATERMARK_FIELD` doesn't match the API's response shape | Use Tab 7 → Discover Schema to confirm the path; update the config |
+| Watermark not advancing | `WATERMARK_FIELD` doesn't match the API's response shape | Use Tab 5 (Data Explorer) → Schema Discovery to confirm the path; update the config |
 | Want to re-pull all history | Watermark stuck on a recent value | Tab 1 → INCREMENTAL SYNC CONTROL → **Clear (Full Backfill)** |
 | Flaky API but final status 200 | Transient errors hidden in old logs | Open Tab 4 → **Retry Drill-Down** to see every attempt |
-| Generated view fails to create | Inferred type cast errors on real data | In Tab 7, switch **Type Strategy** to "All STRING (safe)" |
+| Generated view fails to create | Inferred type cast errors on real data | In Tab 5 (Data Explorer → Schema Discovery), switch **Type Strategy** to "All STRING (safe)" |
 | Task auto-suspended | Exceeded `SUSPEND_TASK_AFTER_NUM_FAILURES` | Fix the API issue, then Resume in Tab 6 |
 
 ---
@@ -281,4 +288,4 @@ Pagination stops when the response contains `{"data": []}` (empty data array).
 | `USP_REBUILD_INGESTOR` | `API_DATA_PIPELINE.METADATA` | Auto-rebuilds ingestor with current secrets. |
 | `EAI_UNIVERSAL_INGESTOR` | Account-level integration | Controls network + secret access. Auto-rebuilt on rule/secret changes. |
 | `TASK_INGEST_<API>` | `API_DATA_PIPELINE.METADATA` | Snowflake Tasks for scheduled ingestion. |
-| `V_<API>` (generated) | `API_DATA_PIPELINE.RAW_LANDING` | Flattened views created via Data Studio. |
+| `V_<API>` (generated) | `API_DATA_PIPELINE.RAW_LANDING` | Flattened views created via Data Explorer → Schema Discovery. |

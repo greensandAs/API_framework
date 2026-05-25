@@ -382,14 +382,13 @@ def active_pill(is_active):
 
 st.title("API Data Extract")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Manage API Configs",
     "Manage Secrets & EAI",
     "Run Ingestion",
     "Ingestion Console",
-    "View Raw Data",
-    "Task Scheduler",
-    "Data Studio"
+    "Data Explorer",
+    "Task Scheduler"
 ])
 
 # ─────────────────────────────────────────────
@@ -864,165 +863,163 @@ with tab1:
 # ─────────────────────────────────────────────
 with tab2:
     section_label("SECURITY INFRASTRUCTURE")
-    st.header("Secrets & External Access Integration")
-    st.caption("Manage credential vaults and network egress policies for secure API communication.")
+    st.header("Secrets & External Access")
+    st.caption("Onboarding pipeline: Network Rules → Security Integrations → Secrets → EAI auto-rebuilds.")
 
-    col_secrets, col_eai = st.columns(2)
+    eai_ok = False
+    eai_rule_count = 0
+    eai_secret_count = 0
+    try:
+        eai_df = run_query("DESCRIBE INTEGRATION EAI_UNIVERSAL_INGESTOR")
+        eai_ok = True
+        try:
+            nr_count_df = run_query(f"SHOW NETWORK RULES IN SCHEMA {META}")
+            eai_rule_count = len(nr_count_df) if not nr_count_df.empty else 0
+        except Exception:
+            pass
+        try:
+            s_count_df = get_secrets_df()
+            eai_secret_count = len(s_count_df) if not s_count_df.empty else 0
+        except Exception:
+            pass
+    except Exception:
+        pass
 
-    with col_secrets:
-        section_label("CREDENTIAL VAULT")
-        st.subheader("Existing Secrets")
-        secrets_df = get_secrets_df()
-        if not secrets_df.empty:
-            display_cols = [c for c in ["NAME", "SECRET_TYPE", "COMMENT", "CREATED_ON"] if c in secrets_df.columns]
-            styled_dataframe(
-                secrets_df[display_cols] if display_cols else secrets_df
-            )
+    if eai_ok:
+        st.markdown(f"""
+        <div style="background:rgba(63,185,80,0.06);border:1px solid rgba(63,185,80,0.2);border-radius:8px;padding:14px 20px;margin-bottom:1rem;display:flex;align-items:center;gap:14px;">
+            <span style="font-size:1.2rem;color:#3fb950;">●</span>
+            <div style="flex:1;">
+                <span style="font-weight:700;color:#e6edf3;font-size:0.9rem;">EAI_UNIVERSAL_INGESTOR</span>
+                <span style="color:#8b949e;font-size:0.78rem;margin-left:12px;">{eai_rule_count} network rule(s) · {eai_secret_count} secret(s)</span>
+            </div>
+            <span style="background:rgba(63,185,80,0.1);color:#3fb950;padding:3px 10px;border-radius:4px;font-size:0.62rem;font-weight:700;letter-spacing:1px;font-family:'JetBrains Mono',monospace;border:1px solid rgba(63,185,80,0.2);">ACTIVE</span>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style="background:rgba(248,81,73,0.06);border:1px solid rgba(248,81,73,0.2);border-radius:8px;padding:14px 20px;margin-bottom:1rem;display:flex;align-items:center;gap:14px;">
+            <span style="font-size:1.2rem;color:#f85149;">○</span>
+            <div style="flex:1;">
+                <span style="font-weight:700;color:#e6edf3;font-size:0.9rem;">EAI_UNIVERSAL_INGESTOR</span>
+                <span style="color:#8b949e;font-size:0.78rem;margin-left:12px;">Not found — create network rules and secrets first</span>
+            </div>
+            <span style="background:rgba(248,81,73,0.1);color:#f85149;padding:3px 10px;border-radius:4px;font-size:0.62rem;font-weight:700;letter-spacing:1px;font-family:'JetBrains Mono',monospace;border:1px solid rgba(248,81,73,0.2);">MISSING</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with st.expander("Step 1: Network Rules", expanded=True):
+        st.caption("Whitelist API hostnames so Snowflake can reach them. EAI is auto-rebuilt when you add a rule.")
+
+        try:
+            nr_df = run_query(f"SHOW NETWORK RULES IN SCHEMA {META}")
+            if not nr_df.empty:
+                nr_df.columns = [c.upper() for c in nr_df.columns]
+                host_list = []
+                for rule_name in nr_df["NAME"].tolist():
+                    try:
+                        desc = run_query(f"DESCRIBE NETWORK RULE {META}.{rule_name}")
+                        desc.columns = [c.upper() for c in desc.columns]
+                        if "VALUE_LIST" in desc.columns:
+                            hosts = desc["VALUE_LIST"].iloc[0] if not desc.empty else ""
+                        else:
+                            hosts = ""
+                        host_list.append(hosts)
+                    except Exception:
+                        host_list.append("")
+                nr_df["ALLOWED_HOSTS"] = host_list
+                display_cols = [c for c in ["NAME", "ALLOWED_HOSTS", "CREATED_ON"] if c in nr_df.columns]
+                styled_dataframe(nr_df[display_cols] if display_cols else nr_df)
+            else:
+                st.info("No network rules found. Add one below.")
+        except Exception:
+            st.info("No network rules found. Add one below.")
 
         st.divider()
-        section_label("NEW CREDENTIAL")
-        st.subheader("Create New Secret")
-        secret_type = st.selectbox("Secret Type", ["GENERIC_STRING", "PASSWORD", "OAUTH2"])
+        section_label("ADD NETWORK RULE")
+        with st.form("create_nr", clear_on_submit=True):
+            nr_c1, nr_c2 = st.columns([1, 2])
+            with nr_c1:
+                nr_name = st.text_input("Rule Name")
+            with nr_c2:
+                nr_hosts = st.text_input("Allowed Hosts (comma-separated)", placeholder="api.example.com, api2.example.com")
+            if st.form_submit_button("Create Network Rule", type="primary"):
+                if not nr_name or not nr_hosts:
+                    st.warning("Name and hosts are required.")
+                elif not is_safe_name(nr_name):
+                    st.error("Invalid name. Use only letters, digits, and underscores.")
+                else:
+                    try:
+                        hosts = ", ".join([f"'{escape_sql_literal(h.strip())}'" for h in nr_hosts.split(",")])
+                        exec_sql(
+                            f"CREATE OR REPLACE NETWORK RULE {META}.{nr_name} "
+                            f"MODE = EGRESS TYPE = HOST_PORT VALUE_LIST = ({hosts})"
+                        )
+                        eai_msg = rebuild_eai()
+                        st.success(f"Network rule '{nr_name}' created — {eai_msg}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
 
-        if secret_type == "GENERIC_STRING":
-            with st.form("create_generic_secret", clear_on_submit=True):
-                s_name = st.text_input("Secret Name")
-                s_value = st.text_input("Secret String", type="password")
-                s_comment = st.text_input("Comment")
-                if st.form_submit_button("Create Secret"):
-                    if not s_name or not s_value:
-                        st.warning("Name and value are required.")
-                    elif not is_safe_name(s_name):
-                        st.error("Invalid name. Use only letters, digits, and underscores (must start with letter or underscore).")
-                    else:
-                        try:
-                            escaped_value = escape_sql_literal(s_value)
-                            escaped_comment = escape_sql_literal(s_comment)
-                            exec_sql(
-                                f"CREATE SECRET {META}.{s_name} "
-                                f"TYPE = GENERIC_STRING SECRET_STRING = '{escaped_value}' "
-                                f"COMMENT = '{escaped_comment}'"
-                            )
-                            get_secrets_df.clear()
-                            try:
-                                eai_msg = rebuild_eai()
-                                st.success(f"Secret '{s_name}' created — {eai_msg}")
-                            except Exception:
-                                st.success(f"Secret '{s_name}' created (EAI rebuild skipped — update manually)")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(str(e))
-
-        elif secret_type == "PASSWORD":
-            with st.form("create_password_secret", clear_on_submit=True):
-                s_name = st.text_input("Secret Name")
-                s_user = st.text_input("Username (Client ID)")
-                s_pass = st.text_input("Password (Client Secret)", type="password")
-                s_comment = st.text_input("Comment")
-                if st.form_submit_button("Create Secret"):
-                    if not s_name or not s_user or not s_pass:
-                        st.warning("All fields are required.")
-                    elif not is_safe_name(s_name):
-                        st.error("Invalid name. Use only letters, digits, and underscores (must start with letter or underscore).")
-                    else:
-                        try:
-                            escaped_user = escape_sql_literal(s_user)
-                            escaped_pass = escape_sql_literal(s_pass)
-                            escaped_comment = escape_sql_literal(s_comment)
-                            exec_sql(
-                                f"CREATE SECRET {META}.{s_name} "
-                                f"TYPE = PASSWORD USERNAME = '{escaped_user}' PASSWORD = '{escaped_pass}' "
-                                f"COMMENT = '{escaped_comment}'"
-                            )
-                            get_secrets_df.clear()
-                            try:
-                                eai_msg = rebuild_eai()
-                                st.success(f"Secret '{s_name}' created — {eai_msg}")
-                            except Exception:
-                                st.success(f"Secret '{s_name}' created (EAI rebuild skipped — update manually)")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(str(e))
-
-        elif secret_type == "OAUTH2":
-            with st.form("create_oauth_secret", clear_on_submit=True):
-                s_name = st.text_input("Secret Name")
-                s_int = st.text_input("Security Integration Name")
-                s_refresh = st.text_input("OAuth Refresh Token", type="password")
-                s_comment = st.text_input("Comment")
-                if st.form_submit_button("Create Secret"):
-                    if not s_name or not s_int:
-                        st.warning("Name and integration are required.")
-                    elif not is_safe_name(s_name) or not is_safe_name(s_int):
-                        st.error("Invalid name. Use only letters, digits, and underscores (must start with letter or underscore).")
-                    else:
-                        try:
-                            escaped_refresh = escape_sql_literal(s_refresh) if s_refresh else ""
-                            escaped_comment = escape_sql_literal(s_comment)
-                            refresh_clause = f"OAUTH_REFRESH_TOKEN = '{escaped_refresh}'" if s_refresh else ""
-                            exec_sql(
-                                f"CREATE SECRET {META}.{s_name} "
-                                f"TYPE = OAUTH2 API_AUTHENTICATION = {s_int} "
-                                f"{refresh_clause} COMMENT = '{escaped_comment}'"
-                            )
-                            get_secrets_df.clear()
-                            try:
-                                eai_msg = rebuild_eai()
-                                st.success(f"Secret '{s_name}' created — {eai_msg}")
-                            except Exception:
-                                st.success(f"Secret '{s_name}' created (EAI rebuild skipped — update manually)")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(str(e))
-
-    with col_eai:
-        section_label("OAUTH INTEGRATION")
-        st.subheader("Create Security Integration")
-        st.caption("Required before creating OAUTH2-type secrets. Only Client Credentials flow is supported for M2M ingestion.")
+    with st.expander("Step 2: Security Integrations", expanded=False):
+        st.caption(
+            "Required before creating OAUTH2-type secrets. Only Client Credentials flow is supported. "
+            "**Names must start with `SEC_INT_API_`** so the framework can distinguish its own integrations from "
+            "unrelated account-level integrations (Snowsight OAuth, SCIM, SSO, etc.)."
+        )
 
         try:
             integrations_df = get_integrations_df()
-            api_auth_df = integrations_df[integrations_df["TYPE"] == "API_AUTHENTICATION"] if "TYPE" in integrations_df.columns else pd.DataFrame()
+            if "NAME" in integrations_df.columns and "TYPE" in integrations_df.columns:
+                api_auth_df = integrations_df[
+                    (integrations_df["TYPE"] == "API_AUTHENTICATION") &
+                    (integrations_df["NAME"].str.startswith("SEC_INT_API_", na=False))
+                ]
+            else:
+                api_auth_df = pd.DataFrame()
             if not api_auth_df.empty:
                 display_cols = [c for c in ["NAME", "TYPE", "ENABLED", "CREATED_ON", "COMMENT"] if c in api_auth_df.columns]
                 styled_dataframe(api_auth_df[display_cols] if display_cols else api_auth_df)
             else:
-                st.info("No API_AUTHENTICATION integrations found.")
+                st.info("No framework-owned integrations found (none matching `SEC_INT_API_*`). Add one below if using OAuth2.")
         except Exception:
             st.info("Unable to list security integrations.")
 
+        st.divider()
+        section_label("ADD SECURITY INTEGRATION")
         with st.form("create_oauth_integration", clear_on_submit=True):
-            oi_name = st.text_input("Integration Name *")
-            oi_client_id = st.text_input("OAuth Client ID *")
-            oi_client_secret = st.text_input("OAuth Client Secret *", type="password")
-            oi_token_endpoint = st.text_input("OAuth Token Endpoint URL *", placeholder="https://auth.example.com/oauth/token")
-            oi_auth_method = st.selectbox("Client Auth Method", ["CLIENT_SECRET_POST", "CLIENT_SECRET_BASIC"])
-            oi_scopes = st.text_input("Allowed Scopes (comma-separated)", placeholder="read, write")
-            oi_token_validity = st.number_input("Access Token Validity (seconds)", value=0, min_value=0, help="0 = use provider default")
-            oi_comment = st.text_input("Comment")
+            oi_c1, oi_c2 = st.columns(2)
+            with oi_c1:
+                oi_name = st.text_input("Integration Name *", placeholder="SEC_INT_API_<your_api>")
+                oi_client_id = st.text_input("OAuth Client ID *")
+                oi_client_secret = st.text_input("OAuth Client Secret *", type="password")
+                oi_token_endpoint = st.text_input("Token Endpoint URL *", placeholder="https://auth.example.com/oauth/token")
+            with oi_c2:
+                oi_auth_method = st.selectbox("Client Auth Method", ["CLIENT_SECRET_POST", "CLIENT_SECRET_BASIC"])
+                oi_scopes = st.text_input("Allowed Scopes (comma-separated)", placeholder="read, write")
+                oi_token_validity = st.number_input("Token Validity (seconds)", value=0, min_value=0, help="0 = provider default")
+                oi_comment = st.text_input("Comment")
             oi_enabled = st.toggle("Enabled", value=True)
 
-            if st.form_submit_button("Create Integration"):
+            if st.form_submit_button("Create Integration", type="primary"):
                 if not oi_name or not oi_client_id or not oi_client_secret or not oi_token_endpoint:
                     st.error("All fields marked with * are required.")
                 elif not is_safe_name(oi_name):
-                    st.error("Invalid name. Use only letters, digits, and underscores (must start with letter or underscore).")
+                    st.error("Invalid name. Use only letters, digits, and underscores.")
+                elif not oi_name.startswith("SEC_INT_API_"):
+                    st.error("Integration name must start with `SEC_INT_API_` (framework convention).")
                 else:
                     try:
                         escaped_client_id = escape_sql_literal(oi_client_id)
                         escaped_client_secret = escape_sql_literal(oi_client_secret)
                         escaped_token_endpoint = escape_sql_literal(oi_token_endpoint)
                         escaped_comment = escape_sql_literal(oi_comment)
-
                         scopes_clause = ""
                         if oi_scopes.strip():
                             scopes_list = ", ".join([f"'{escape_sql_literal(s.strip())}'" for s in oi_scopes.split(",")])
                             scopes_clause = f"OAUTH_ALLOWED_SCOPES = ({scopes_list})"
-
                         validity_clause = f"OAUTH_ACCESS_TOKEN_VALIDITY = {int(oi_token_validity)}" if oi_token_validity > 0 else ""
-
                         comment_clause = f"COMMENT = '{escaped_comment}'" if oi_comment else ""
-
                         sql = (
                             f"CREATE SECURITY INTEGRATION {oi_name} "
                             f"TYPE = API_AUTHENTICATION "
@@ -1043,50 +1040,131 @@ with tab2:
                     except Exception as e:
                         st.error(str(e))
 
-        st.divider()
-        section_label("NETWORK PERIMETER")
-        st.subheader("External Access Integration")
-        try:
-            eai_df = run_query("DESCRIBE INTEGRATION EAI_UNIVERSAL_INGESTOR")
-            styled_dataframe(eai_df)
-        except Exception:
-            st.warning("EAI_UNIVERSAL_INGESTOR not found or no access.")
+    with st.expander("Step 3: Secrets", expanded=False):
+        st.caption("Store API keys and OAuth credentials. EAI is auto-rebuilt when you add a secret.")
+
+        secrets_df = get_secrets_df()
+        if not secrets_df.empty:
+            for stype in ["GENERIC_STRING", "PASSWORD", "OAUTH2"]:
+                type_df = secrets_df[secrets_df["SECRET_TYPE"] == stype] if "SECRET_TYPE" in secrets_df.columns else pd.DataFrame()
+                if not type_df.empty:
+                    section_label(stype)
+                    display_cols = [c for c in ["NAME", "COMMENT", "CREATED_ON"] if c in type_df.columns]
+                    styled_dataframe(type_df[display_cols] if display_cols else type_df, height=200)
+        else:
+            st.info("No secrets found. Create one below.")
 
         st.divider()
-        section_label("EGRESS RULES")
-        st.subheader("Network Rules")
-        try:
-            nr_df = run_query(f"SHOW NETWORK RULES IN SCHEMA {META}")
-            if not nr_df.empty:
-                nr_df.columns = [c.upper() for c in nr_df.columns]
-                display_cols = [c for c in ["NAME", "TYPE", "MODE", "CREATED_ON"] if c in nr_df.columns]
-                styled_dataframe(nr_df[display_cols] if display_cols else nr_df)
-        except Exception:
-            st.info("No network rules found.")
+        section_label("ADD SECRET")
+        secret_type = st.selectbox("Secret Type", ["GENERIC_STRING", "PASSWORD", "OAUTH2"])
 
-        st.divider()
-        section_label("NEW RULE")
-        st.subheader("Create Network Rule")
-        with st.form("create_nr", clear_on_submit=True):
-            nr_name = st.text_input("Network Rule Name")
-            nr_hosts = st.text_input("Allowed Hosts (comma-separated)", placeholder="api.example.com, api2.example.com")
-            if st.form_submit_button("Create Network Rule"):
-                if not nr_name or not nr_hosts:
-                    st.warning("Name and hosts are required.")
-                elif not is_safe_name(nr_name):
-                    st.error("Invalid name. Use only letters, digits, and underscores (must start with letter or underscore).")
-                else:
-                    try:
-                        hosts = ", ".join([f"'{escape_sql_literal(h.strip())}'" for h in nr_hosts.split(",")])
-                        exec_sql(
-                            f"CREATE OR REPLACE NETWORK RULE {META}.{nr_name} "
-                            f"MODE = EGRESS TYPE = HOST_PORT VALUE_LIST = ({hosts})"
-                        )
-                        eai_msg = rebuild_eai()
-                        st.success(f"Network rule '{nr_name}' created — {eai_msg}")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
+        if secret_type == "GENERIC_STRING":
+            with st.form("create_generic_secret", clear_on_submit=True):
+                sg_c1, sg_c2 = st.columns(2)
+                with sg_c1:
+                    s_name = st.text_input("Secret Name")
+                    s_value = st.text_input("Secret String", type="password")
+                with sg_c2:
+                    s_comment = st.text_input("Comment")
+                if st.form_submit_button("Create Secret", type="primary"):
+                    if not s_name or not s_value:
+                        st.warning("Name and value are required.")
+                    elif not is_safe_name(s_name):
+                        st.error("Invalid name. Use only letters, digits, and underscores.")
+                    else:
+                        try:
+                            exec_sql(
+                                f"CREATE SECRET {META}.{s_name} "
+                                f"TYPE = GENERIC_STRING SECRET_STRING = '{escape_sql_literal(s_value)}' "
+                                f"COMMENT = '{escape_sql_literal(s_comment)}'"
+                            )
+                            get_secrets_df.clear()
+                            try:
+                                eai_msg = rebuild_eai()
+                                st.success(f"Secret '{s_name}' created — {eai_msg}")
+                            except Exception:
+                                st.success(f"Secret '{s_name}' created (EAI rebuild skipped)")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+
+        elif secret_type == "PASSWORD":
+            with st.form("create_password_secret", clear_on_submit=True):
+                sp_c1, sp_c2 = st.columns(2)
+                with sp_c1:
+                    s_name = st.text_input("Secret Name")
+                    s_user = st.text_input("Username (Client ID)")
+                with sp_c2:
+                    s_pass = st.text_input("Password (Client Secret)", type="password")
+                    s_comment = st.text_input("Comment")
+                if st.form_submit_button("Create Secret", type="primary"):
+                    if not s_name or not s_user or not s_pass:
+                        st.warning("All fields are required.")
+                    elif not is_safe_name(s_name):
+                        st.error("Invalid name. Use only letters, digits, and underscores.")
+                    else:
+                        try:
+                            exec_sql(
+                                f"CREATE SECRET {META}.{s_name} "
+                                f"TYPE = PASSWORD USERNAME = '{escape_sql_literal(s_user)}' PASSWORD = '{escape_sql_literal(s_pass)}' "
+                                f"COMMENT = '{escape_sql_literal(s_comment)}'"
+                            )
+                            get_secrets_df.clear()
+                            try:
+                                eai_msg = rebuild_eai()
+                                st.success(f"Secret '{s_name}' created — {eai_msg}")
+                            except Exception:
+                                st.success(f"Secret '{s_name}' created (EAI rebuild skipped)")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+
+        elif secret_type == "OAUTH2":
+            int_opts = []
+            try:
+                idf = get_integrations_df()
+                if not idf.empty and "TYPE" in idf.columns and "NAME" in idf.columns:
+                    int_opts = idf[
+                        (idf["TYPE"].str.contains("API_AUTHENTICATION", case=False, na=False)) &
+                        (idf["NAME"].str.startswith("SEC_INT_API_", na=False))
+                    ]["NAME"].tolist()
+            except Exception:
+                pass
+
+            with st.form("create_oauth_secret", clear_on_submit=True):
+                so_c1, so_c2 = st.columns(2)
+                with so_c1:
+                    s_name = st.text_input("Secret Name")
+                    if int_opts:
+                        s_int = st.selectbox("Security Integration", int_opts, key="oauth_sec_int")
+                    else:
+                        s_int = st.text_input("Security Integration Name (none found — create one in Step 2)")
+                with so_c2:
+                    s_refresh = st.text_input("OAuth Refresh Token", type="password")
+                    s_comment = st.text_input("Comment")
+                if st.form_submit_button("Create Secret", type="primary"):
+                    if not s_name or not s_int:
+                        st.warning("Name and integration are required.")
+                    elif not is_safe_name(s_name) or not is_safe_name(s_int):
+                        st.error("Invalid name. Use only letters, digits, and underscores.")
+                    else:
+                        try:
+                            escaped_refresh = escape_sql_literal(s_refresh) if s_refresh else ""
+                            refresh_clause = f"OAUTH_REFRESH_TOKEN = '{escaped_refresh}'" if s_refresh else ""
+                            exec_sql(
+                                f"CREATE SECRET {META}.{s_name} "
+                                f"TYPE = OAUTH2 API_AUTHENTICATION = {s_int} "
+                                f"{refresh_clause} COMMENT = '{escape_sql_literal(s_comment)}'"
+                            )
+                            get_secrets_df.clear()
+                            try:
+                                eai_msg = rebuild_eai()
+                                st.success(f"Secret '{s_name}' created — {eai_msg}")
+                            except Exception:
+                                st.success(f"Secret '{s_name}' created (EAI rebuild skipped)")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
 
 # ─────────────────────────────────────────────
 # TAB 3: Run Ingestion
@@ -1446,71 +1524,282 @@ with tab4:
 # TAB 5: View Raw Data
 # ─────────────────────────────────────────────
 with tab5:
-    section_label("DATA ARCHIVE")
-    st.header("Raw Landing Data")
-    st.caption("Browse ingested JSON payloads stored in the raw landing zone.")
+    section_label("DATA EXPLORER")
+    st.header("Browse, Discover, Model")
+    st.caption("Inspect raw landed payloads and one-click generate flattened SQL views.")
 
-    landing_tables_df = run_query(
-        f"SELECT DISTINCT COALESCE(LANDING_TABLE, 'API_RAW_DATA') AS TABLE_NAME "
-        f"FROM {META}.INGESTION_CONFIGS ORDER BY TABLE_NAME"
-    )
-    table_options = landing_tables_df["TABLE_NAME"].tolist() if not landing_tables_df.empty else ["API_RAW_DATA"]
-    if "API_RAW_DATA" not in table_options:
-        table_options.insert(0, "API_RAW_DATA")
+    # ─── Shared selectors (apply to both inner tabs) ───
+    try:
+        ls_tables = run_query(
+            f"SELECT TABLE_NAME FROM {DB}.INFORMATION_SCHEMA.TABLES "
+            f"WHERE TABLE_SCHEMA = 'RAW_LANDING' ORDER BY TABLE_NAME"
+        )
+        landing_tables = ls_tables["TABLE_NAME"].tolist() if not ls_tables.empty else ["API_RAW_DATA"]
+    except Exception:
+        landing_tables = ["API_RAW_DATA"]
+    if "API_RAW_DATA" not in landing_tables:
+        landing_tables.insert(0, "API_RAW_DATA")
 
-    col_r0, col_r1, col_r2, col_r3 = st.columns(4)
-    with col_r0:
-        selected_table = st.selectbox("Landing Table", table_options, key="raw_table")
-    with col_r1:
-        raw_apis = run_query(f"SELECT DISTINCT API_NAME FROM {RAW}.{selected_table} ORDER BY API_NAME")
-        raw_api_filter = st.selectbox("Filter by API", ["All"] + (raw_apis["API_NAME"].tolist() if not raw_apis.empty else []))
-    with col_r2:
-        raw_limit = st.slider("Max rows", 10, 500, 50, step=10, key="raw_limit")
-    with col_r3:
-        show_payload = st.checkbox("Show full payload", value=False)
+    de_c1, de_c2 = st.columns([2, 2])
+    with de_c1:
+        de_table = st.selectbox("Landing Table", landing_tables, key="de_table")
+    with de_c2:
+        try:
+            de_apis = run_query(f"SELECT DISTINCT API_NAME FROM {RAW}.{de_table} ORDER BY API_NAME")
+            de_api_options = ["All"] + (de_apis["API_NAME"].tolist() if not de_apis.empty else [])
+        except Exception:
+            de_api_options = ["All"]
+        de_api = st.selectbox("Filter by API", de_api_options, key="de_api")
 
-    raw_where = "WHERE API_NAME = ?" if raw_api_filter != "All" else ""
-    raw_params = [raw_api_filter] if raw_api_filter != "All" else None
-    payload_col = "PAYLOAD" if show_payload else "LEFT(PAYLOAD::STRING, 200) AS PAYLOAD_PREVIEW"
+    inner_raw, inner_schema = st.tabs(["Raw Payloads", "Schema Discovery"])
 
-    raw_data = run_query(
-        f"SELECT API_NAME, STATUS_CODE, INGEST_TS, PAYLOAD_HASH, URL_ATTEMPTED, {payload_col} "
-        f"FROM {RAW}.{selected_table} {raw_where} "
-        f"ORDER BY INGEST_TS DESC LIMIT {raw_limit}",
-        params=raw_params
-    )
+    # ─── Inner Tab: Raw Payloads ───
+    with inner_raw:
+        section_label("RAW PAYLOADS")
+        rc1, rc2 = st.columns([1, 1])
+        with rc1:
+            raw_limit = st.slider("Max rows", 10, 500, 50, step=10, key="raw_limit")
+        with rc2:
+            show_payload = st.checkbox("Show full payload", value=False, key="raw_show_payload")
 
-    if not raw_data.empty:
-        col_rm1, col_rm2, col_rm3 = st.columns(3)
-        with col_rm1:
-            with st.container(border=True):
-                st.metric("RECORDS SHOWN", len(raw_data))
-        with col_rm2:
-            with st.container(border=True):
-                total = run_query(f"SELECT COUNT(*) AS CNT FROM {RAW}.{selected_table} {raw_where}", params=raw_params)
-                st.metric("TOTAL RECORDS", f"{int(total['CNT'].iloc[0]):,}")
-        with col_rm3:
-            with st.container(border=True):
-                distinct_apis = run_query(f"SELECT COUNT(DISTINCT API_NAME) AS CNT FROM {RAW}.{selected_table}")
-                st.metric("DISTINCT APIs", int(distinct_apis["CNT"].iloc[0]))
+        raw_where = "WHERE API_NAME = ?" if de_api != "All" else ""
+        raw_params = [de_api] if de_api != "All" else None
+        payload_col = "PAYLOAD" if show_payload else "LEFT(PAYLOAD::STRING, 200) AS PAYLOAD_PREVIEW"
 
-        styled_dataframe(raw_data)
+        raw_data = run_query(
+            f"SELECT API_NAME, STATUS_CODE, INGEST_TS, PAYLOAD_HASH, URL_ATTEMPTED, {payload_col} "
+            f"FROM {RAW}.{de_table} {raw_where} "
+            f"ORDER BY INGEST_TS DESC LIMIT {raw_limit}",
+            params=raw_params
+        )
 
-        if raw_api_filter != "All":
-            st.divider()
-            section_label("PAYLOAD INSPECTOR")
-            st.subheader("Expand a Record")
-            if not raw_data.empty:
-                selected_hash = st.selectbox("Select by PAYLOAD_HASH", raw_data["PAYLOAD_HASH"].tolist())
-                if st.button("Show Full Payload"):
+        if not raw_data.empty:
+            col_rm1, col_rm2, col_rm3 = st.columns(3)
+            with col_rm1:
+                with st.container(border=True):
+                    st.metric("RECORDS SHOWN", len(raw_data))
+            with col_rm2:
+                with st.container(border=True):
+                    total = run_query(f"SELECT COUNT(*) AS CNT FROM {RAW}.{de_table} {raw_where}", params=raw_params)
+                    st.metric("TOTAL RECORDS", f"{int(total['CNT'].iloc[0]):,}")
+            with col_rm3:
+                with st.container(border=True):
+                    distinct_apis = run_query(f"SELECT COUNT(DISTINCT API_NAME) AS CNT FROM {RAW}.{de_table}")
+                    st.metric("DISTINCT APIs", int(distinct_apis["CNT"].iloc[0]))
+
+            styled_dataframe(raw_data)
+
+            if de_api != "All":
+                st.divider()
+                section_label("PAYLOAD INSPECTOR")
+                st.subheader("Expand a Record")
+                selected_hash = st.selectbox("Select by PAYLOAD_HASH", raw_data["PAYLOAD_HASH"].tolist(), key="raw_inspect_hash")
+                if st.button("Show Full Payload", key="btn_raw_show_full"):
                     full = run_query(
-                        f"SELECT PAYLOAD FROM {RAW}.{selected_table} WHERE PAYLOAD_HASH = ?",
+                        f"SELECT PAYLOAD FROM {RAW}.{de_table} WHERE PAYLOAD_HASH = ?",
                         params=[selected_hash]
                     )
                     if not full.empty:
                         st.json(str(full["PAYLOAD"].iloc[0]))
-    else:
-        st.info("No raw data found.")
+        else:
+            st.info("No raw data found for the selected table / API.")
+
+    # ─── Inner Tab: Schema Discovery + View Generator ───
+    with inner_schema:
+        section_label("SCHEMA DISCOVERY & VIEW GENERATION")
+        st.caption("Inspect the JSON shape of landed records and one-click generate flattened SQL views.")
+
+        sc_c1, sc_c2 = st.columns([2, 1])
+        with sc_c1:
+            ds_records_path = st.text_input(
+                "Records JSON Path",
+                value="data",
+                key="ds_records_path",
+                help="Dotted path inside PAYLOAD that holds the record array. Default 'data' matches the framework's chunking format. Leave blank if PAYLOAD itself is the record."
+            )
+        with sc_c2:
+            ds_sample = st.number_input("Sample Size", min_value=10, max_value=2000, value=100, step=10, key="ds_sample")
+
+        default_view = f"V_{de_api}" if de_api != "All" else f"V_{de_table}_FLAT"
+        ds_view_name = st.text_input(
+            "Target View Name",
+            value=default_view,
+            key="ds_view_name",
+            help="View will be created in API_DATA_PIPELINE.RAW_LANDING."
+        )
+
+        if st.button("Discover Schema", type="primary", key="btn_ds_discover"):
+            try:
+                where_clause = ""
+                params = []
+                if de_api != "All":
+                    where_clause = "WHERE API_NAME = ?"
+                    params = [de_api]
+                sample_df = run_query(
+                    f"SELECT PAYLOAD FROM {RAW}.{de_table} {where_clause} LIMIT {int(ds_sample)}",
+                    params=params if params else None
+                )
+                if sample_df.empty:
+                    st.warning("No rows returned for the selected filter.")
+                else:
+                    path_types = {}
+                    path_counts = {}
+                    total_records = 0
+                    for _, srow in sample_df.iterrows():
+                        payload = _ds_parse_payload(srow["PAYLOAD"])
+                        if payload is None:
+                            continue
+                        records = _ds_collect_records(payload, (ds_records_path or "").strip())
+                        for rec in records:
+                            total_records += 1
+                            for path, val in _ds_walk(rec):
+                                t = _ds_infer_type(val)
+                                path_types.setdefault(path, set()).add(t)
+                                path_counts[path] = path_counts.get(path, 0) + 1
+                    if total_records == 0:
+                        st.warning(
+                            "Sample returned PAYLOADs but no records were found at the given path. "
+                            "Try clearing the 'Records JSON Path' field or checking the payload structure."
+                        )
+                    else:
+                        schema_rows = []
+                        for path, types in sorted(path_types.items()):
+                            preferred_order = ["TIMESTAMP_TZ", "BOOLEAN", "NUMBER", "FLOAT", "OBJECT", "ARRAY", "STRING"]
+                            chosen = next((t for t in preferred_order if t in types), "VARIANT")
+                            coverage_pct = round(100.0 * path_counts[path] / total_records, 1)
+                            schema_rows.append({
+                                "PATH": path,
+                                "TYPE": chosen,
+                                "COVERAGE_%": coverage_pct,
+                                "OBSERVED_TYPES": ", ".join(sorted(types))
+                            })
+                        schema_df = pd.DataFrame(schema_rows)
+                        st.session_state["ds_schema_df"] = schema_df
+                        st.session_state["ds_schema_table"] = de_table
+                        st.session_state["ds_schema_api"] = de_api
+                        st.session_state["ds_schema_records_path"] = (ds_records_path or "").strip()
+                        st.session_state["ds_schema_total"] = total_records
+                        st.success(f"Discovered {len(schema_df)} field(s) across {total_records} record(s).")
+            except Exception as e:
+                st.error(f"Schema discovery failed: {str(e)}")
+
+        if "ds_schema_df" in st.session_state and not st.session_state["ds_schema_df"].empty:
+            st.divider()
+            section_label("DISCOVERED SCHEMA")
+
+            sch_df = st.session_state["ds_schema_df"]
+            m_c1, m_c2, m_c3 = st.columns(3)
+            with m_c1:
+                with st.container(border=True):
+                    st.metric("FIELDS DETECTED", len(sch_df))
+            with m_c2:
+                with st.container(border=True):
+                    st.metric("RECORDS SAMPLED", st.session_state.get("ds_schema_total", 0))
+            with m_c3:
+                with st.container(border=True):
+                    full_coverage = int((sch_df["COVERAGE_%"] >= 99.9).sum())
+                    st.metric("FIELDS WITH 100% COVERAGE", full_coverage)
+
+            styled_dataframe(sch_df)
+
+            partial = sch_df[sch_df["COVERAGE_%"] < 100].copy()
+            if not partial.empty:
+                with st.expander("Quality Check — Fields with Partial Coverage", expanded=False):
+                    st.caption(
+                        "Fields below appear in some — but not all — records of the sample. "
+                        "If a previously required field has dropped below 100%, the upstream API may have changed."
+                    )
+                    styled_dataframe(partial[["PATH", "TYPE", "COVERAGE_%"]])
+
+            st.divider()
+            section_label("GENERATE FLATTENED VIEW")
+
+            gen_c1, gen_c2 = st.columns([3, 1])
+            with gen_c1:
+                include_meta = st.checkbox(
+                    "Include framework columns (INGEST_TS, API_NAME, STATUS_CODE, URL_ATTEMPTED)",
+                    value=True,
+                    key="ds_include_meta"
+                )
+            with gen_c2:
+                type_strategy = st.selectbox(
+                    "Type Strategy",
+                    ["Inferred", "All STRING (safe)"],
+                    key="ds_type_strategy",
+                    help="Inferred: cast to detected types. All STRING: cast everything to STRING (no cast errors)."
+                )
+
+            type_map = {
+                "STRING": "STRING",
+                "NUMBER": "NUMBER",
+                "FLOAT": "FLOAT",
+                "BOOLEAN": "BOOLEAN",
+                "TIMESTAMP_TZ": "TIMESTAMP_TZ",
+                "OBJECT": "VARIANT",
+                "ARRAY": "ARRAY",
+                "VARIANT": "VARIANT",
+            }
+            cols_sql = []
+            if include_meta:
+                cols_sql.append("    base.INGEST_TS")
+                cols_sql.append("    base.API_NAME")
+                cols_sql.append("    base.STATUS_CODE")
+                cols_sql.append("    base.URL_ATTEMPTED")
+            for _, srow in sch_df.iterrows():
+                path = srow["PATH"]
+                type_alias = type_map.get(srow["TYPE"], "STRING") if type_strategy == "Inferred" else "STRING"
+                access = "rec.value"
+                for part in path.split("."):
+                    access += f":{part}"
+                col_alias = re.sub(r"[^A-Za-z0-9_]", "_", path).upper()
+                cols_sql.append(f"    {access}::{type_alias} AS {col_alias}")
+
+            records_path_used = st.session_state.get("ds_schema_records_path", "")
+            if records_path_used:
+                from_clause = (
+                    f"FROM {RAW}.{st.session_state['ds_schema_table']} base,\n"
+                    f"     LATERAL FLATTEN(input => base.PAYLOAD:{records_path_used}) rec"
+                )
+            else:
+                from_clause = (
+                    f"FROM {RAW}.{st.session_state['ds_schema_table']} base,\n"
+                    f"     LATERAL FLATTEN(input => base.PAYLOAD) rec"
+                )
+
+            api_filter = ""
+            if st.session_state.get("ds_schema_api", "All") != "All":
+                api_filter = f"\nWHERE base.API_NAME = '{escape_sql_literal(st.session_state['ds_schema_api'])}'"
+
+            safe_view_name = re.sub(r"[^A-Za-z0-9_]", "_", ds_view_name) if ds_view_name else "V_FLAT"
+            view_ddl = (
+                f"CREATE OR REPLACE VIEW {RAW}.{safe_view_name} AS\n"
+                f"SELECT\n"
+                + ",\n".join(cols_sql) + "\n"
+                + from_clause + api_filter
+            )
+
+            st.code(view_ddl, language="sql")
+
+            ddl_c1, ddl_c2 = st.columns(2)
+            with ddl_c1:
+                if st.button("Create / Replace View", type="primary", key="btn_ds_create_view"):
+                    if not is_safe_name(safe_view_name):
+                        st.error("Invalid view name.")
+                    else:
+                        try:
+                            exec_sql(view_ddl)
+                            st.success(f"View {RAW}.{safe_view_name} created.")
+                        except Exception as e:
+                            st.error(f"Create view failed: {str(e)}")
+            with ddl_c2:
+                st.download_button(
+                    "Download DDL",
+                    view_ddl,
+                    file_name=f"{safe_view_name}.sql",
+                    mime="text/sql",
+                    use_container_width=True,
+                    key="btn_ds_download_ddl"
+                )
 
 # ─────────────────────────────────────────────
 # TAB 6: Task Scheduler
@@ -1853,225 +2142,3 @@ def _ds_parse_payload(p):
         return json.loads(p)
     except Exception:
         return None
-
-with tab7:
-    section_label("DATA STUDIO")
-    st.header("Schema Discovery & View Generation")
-    st.caption("Inspect the JSON shape of landed records and one-click generate flattened SQL views.")
-
-    # Build list of landing tables (RAW_LANDING + any custom landing tables in configs)
-    try:
-        ls_tables = run_query(
-            f"SELECT TABLE_NAME FROM API_DATA_PIPELINE.INFORMATION_SCHEMA.TABLES "
-            f"WHERE TABLE_SCHEMA = 'RAW_LANDING' ORDER BY TABLE_NAME"
-        )
-        landing_tables = ls_tables["TABLE_NAME"].tolist() if not ls_tables.empty else ["API_RAW_DATA"]
-    except Exception:
-        landing_tables = ["API_RAW_DATA"]
-
-    ds_c1, ds_c2, ds_c3 = st.columns([2, 2, 1])
-    with ds_c1:
-        ds_table = st.selectbox("Landing Table", landing_tables, key="ds_table")
-    with ds_c2:
-        try:
-            ds_apis = run_query(f"SELECT DISTINCT API_NAME FROM {RAW}.{ds_table} ORDER BY API_NAME")
-            ds_api_options = ["All"] + (ds_apis["API_NAME"].tolist() if not ds_apis.empty else [])
-        except Exception:
-            ds_api_options = ["All"]
-        ds_api = st.selectbox("Filter by API", ds_api_options, key="ds_api")
-    with ds_c3:
-        ds_sample = st.number_input("Sample Size", min_value=10, max_value=2000, value=100, step=10, key="ds_sample")
-
-    ds_c4, ds_c5 = st.columns([2, 3])
-    with ds_c4:
-        ds_records_path = st.text_input(
-            "Records JSON Path",
-            value="data",
-            key="ds_records_path",
-            help="Dotted path inside PAYLOAD that holds the record array. Default 'data' matches the framework's chunking format. Leave blank if PAYLOAD itself is the record."
-        )
-    with ds_c5:
-        ds_view_name = st.text_input(
-            "Target View Name",
-            value=f"V_{ds_api}" if ds_api != "All" else f"V_{ds_table}_FLAT",
-            key="ds_view_name",
-            help="View will be created in API_DATA_PIPELINE.RAW_LANDING."
-        )
-
-    if st.button("Discover Schema", type="primary", key="btn_ds_discover"):
-        try:
-            where_clause = ""
-            params = []
-            if ds_api != "All":
-                where_clause = "WHERE API_NAME = ?"
-                params = [ds_api]
-            sample_df = run_query(
-                f"SELECT PAYLOAD FROM {RAW}.{ds_table} {where_clause} LIMIT {int(ds_sample)}",
-                params=params if params else None
-            )
-            if sample_df.empty:
-                st.warning("No rows returned for the selected filter.")
-            else:
-                # Aggregate schema across sampled records
-                path_types = {}
-                path_counts = {}
-                total_records = 0
-                for _, srow in sample_df.iterrows():
-                    payload = _ds_parse_payload(srow["PAYLOAD"])
-                    if payload is None:
-                        continue
-                    records = _ds_collect_records(payload, (ds_records_path or "").strip())
-                    for rec in records:
-                        total_records += 1
-                        for path, val in _ds_walk(rec):
-                            t = _ds_infer_type(val)
-                            path_types.setdefault(path, set()).add(t)
-                            path_counts[path] = path_counts.get(path, 0) + 1
-                if total_records == 0:
-                    st.warning(
-                        "Sample returned PAYLOADs but no records were found at the given path. "
-                        "Try clearing the 'Records JSON Path' field or checking the payload structure."
-                    )
-                else:
-                    schema_rows = []
-                    for path, types in sorted(path_types.items()):
-                        # Pick a single dominant type (prefer specific over STRING fallback)
-                        preferred_order = ["TIMESTAMP_TZ", "BOOLEAN", "NUMBER", "FLOAT", "OBJECT", "ARRAY", "STRING"]
-                        chosen = next((t for t in preferred_order if t in types), "VARIANT")
-                        coverage_pct = round(100.0 * path_counts[path] / total_records, 1)
-                        schema_rows.append({
-                            "PATH": path,
-                            "TYPE": chosen,
-                            "COVERAGE_%": coverage_pct,
-                            "OBSERVED_TYPES": ", ".join(sorted(types))
-                        })
-                    schema_df = pd.DataFrame(schema_rows)
-                    st.session_state["ds_schema_df"] = schema_df
-                    st.session_state["ds_schema_table"] = ds_table
-                    st.session_state["ds_schema_api"] = ds_api
-                    st.session_state["ds_schema_records_path"] = (ds_records_path or "").strip()
-                    st.session_state["ds_schema_total"] = total_records
-                    st.success(f"Discovered {len(schema_df)} field(s) across {total_records} record(s).")
-        except Exception as e:
-            st.error(f"Schema discovery failed: {str(e)}")
-
-    if "ds_schema_df" in st.session_state and not st.session_state["ds_schema_df"].empty:
-        st.divider()
-        section_label("DISCOVERED SCHEMA")
-
-        sch_df = st.session_state["ds_schema_df"]
-        m_c1, m_c2, m_c3 = st.columns(3)
-        with m_c1:
-            with st.container(border=True):
-                st.metric("FIELDS DETECTED", len(sch_df))
-        with m_c2:
-            with st.container(border=True):
-                st.metric("RECORDS SAMPLED", st.session_state.get("ds_schema_total", 0))
-        with m_c3:
-            with st.container(border=True):
-                full_coverage = int((sch_df["COVERAGE_%"] >= 99.9).sum())
-                st.metric("FIELDS WITH 100% COVERAGE", full_coverage)
-
-        styled_dataframe(sch_df)
-
-        # Quality Check panel
-        partial = sch_df[sch_df["COVERAGE_%"] < 100].copy()
-        if not partial.empty:
-            with st.expander("Quality Check — Fields with Partial Coverage", expanded=False):
-                st.caption(
-                    "Fields below appear in some — but not all — records of the sample. "
-                    "If a previously required field has dropped below 100%, the upstream API may have changed."
-                )
-                styled_dataframe(partial[["PATH", "TYPE", "COVERAGE_%"]])
-
-        st.divider()
-        section_label("GENERATE FLATTENED VIEW")
-
-        gen_c1, gen_c2 = st.columns([3, 1])
-        with gen_c1:
-            include_meta = st.checkbox(
-                "Include framework columns (INGEST_TS, API_NAME, STATUS_CODE, URL_ATTEMPTED)",
-                value=True,
-                key="ds_include_meta"
-            )
-        with gen_c2:
-            type_strategy = st.selectbox(
-                "Type Strategy",
-                ["Inferred", "All STRING (safe)"],
-                key="ds_type_strategy",
-                help="Inferred: cast to detected types. All STRING: cast everything to STRING (no cast errors)."
-            )
-
-        # Build CREATE VIEW DDL
-        type_map = {
-            "STRING": "STRING",
-            "NUMBER": "NUMBER",
-            "FLOAT": "FLOAT",
-            "BOOLEAN": "BOOLEAN",
-            "TIMESTAMP_TZ": "TIMESTAMP_TZ",
-            "OBJECT": "VARIANT",
-            "ARRAY": "ARRAY",
-            "VARIANT": "VARIANT",
-        }
-        cols_sql = []
-        if include_meta:
-            cols_sql.append("    base.INGEST_TS")
-            cols_sql.append("    base.API_NAME")
-            cols_sql.append("    base.STATUS_CODE")
-            cols_sql.append("    base.URL_ATTEMPTED")
-        for _, srow in sch_df.iterrows():
-            path = srow["PATH"]
-            type_alias = type_map.get(srow["TYPE"], "STRING") if type_strategy == "Inferred" else "STRING"
-            # Build PAYLOAD:data[*]:a:b accessor via FLATTEN value
-            access = "rec.value"
-            for part in path.split("."):
-                access += f":{part}"
-            col_alias = re.sub(r"[^A-Za-z0-9_]", "_", path).upper()
-            cols_sql.append(f"    {access}::{type_alias} AS {col_alias}")
-
-        records_path_used = st.session_state.get("ds_schema_records_path", "")
-        if records_path_used:
-            from_clause = (
-                f"FROM {RAW}.{st.session_state['ds_schema_table']} base,\n"
-                f"     LATERAL FLATTEN(input => base.PAYLOAD:{records_path_used}) rec"
-            )
-        else:
-            from_clause = (
-                f"FROM {RAW}.{st.session_state['ds_schema_table']} base,\n"
-                f"     LATERAL FLATTEN(input => base.PAYLOAD) rec"
-            )
-
-        api_filter = ""
-        if st.session_state.get("ds_schema_api", "All") != "All":
-            api_filter = f"\nWHERE base.API_NAME = '{escape_sql_literal(st.session_state['ds_schema_api'])}'"
-
-        safe_view_name = re.sub(r"[^A-Za-z0-9_]", "_", ds_view_name) if ds_view_name else "V_FLAT"
-        view_ddl = (
-            f"CREATE OR REPLACE VIEW {RAW}.{safe_view_name} AS\n"
-            f"SELECT\n"
-            + ",\n".join(cols_sql) + "\n"
-            + from_clause + api_filter
-        )
-
-        st.code(view_ddl, language="sql")
-
-        ddl_c1, ddl_c2 = st.columns(2)
-        with ddl_c1:
-            if st.button("Create / Replace View", type="primary", key="btn_ds_create_view"):
-                if not is_safe_name(safe_view_name):
-                    st.error("Invalid view name.")
-                else:
-                    try:
-                        exec_sql(view_ddl)
-                        st.success(f"View {RAW}.{safe_view_name} created.")
-                    except Exception as e:
-                        st.error(f"Create view failed: {str(e)}")
-        with ddl_c2:
-            st.download_button(
-                "Download DDL",
-                view_ddl,
-                file_name=f"{safe_view_name}.sql",
-                mime="text/sql",
-                use_container_width=True,
-                key="btn_ds_download_ddl"
-            )
