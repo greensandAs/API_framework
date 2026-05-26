@@ -99,3 +99,19 @@ FROM API_DATA_PIPELINE.RAW_LANDING.API_RAW_DATA base,
      LATERAL FLATTEN(input => base.PAYLOAD:data) rec
 WHERE base.API_NAME = 'TEST_GITHUB_INCR';
 
+UPDATE API_DATA_PIPELINE.METADATA.INGESTION_CONFIGS
+SET    LANDING_TABLE = 'API_RAW_DATA'
+WHERE  LANDING_TABLE IS NULL
+   OR  LOWER(TRIM(LANDING_TABLE)) IN ('', 'none', 'null');
+
+
+-- Set up an External Access Integration once (ACCOUNTADMIN):
+-- CREATE OR REPLACE NETWORK RULE PYPI_NR
+--   TYPE = HOST_PORT MODE = EGRESS
+--   VALUE_LIST = ('pypi.org', 'pypi.python.org', 'files.pythonhosted.org');
+
+-- CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION PYPI_EAI
+--   ALLOWED_NETWORK_RULES = (PYPI_NR) ENABLED = TRUE;
+
+-- Then attach it to your Streamlit app via Snowsight (App Settings → External Access).
+
