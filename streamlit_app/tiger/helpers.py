@@ -189,3 +189,59 @@ def active_pill(is_active: bool) -> str:
     if is_active:
         return "<span class='stitch-pill pill-active'>ACTIVE</span>"
     return "<span class='stitch-pill pill-inactive'>INACTIVE</span>"
+
+
+def paginated_items(items, page_key: str, page_size: int = 10):
+    """Paginate a list and render prev/next controls.
+    Returns the current page slice. Use like:
+        for item in paginated_items(my_list, "my_page_key"):
+            render_card(item)
+    """
+    total = len(items)
+    if total <= page_size:
+        return items
+
+    if page_key not in st.session_state:
+        st.session_state[page_key] = 0
+    current_page = st.session_state[page_key]
+    total_pages = max(1, -(-total // page_size))
+    current_page = min(current_page, total_pages - 1)
+    st.session_state[page_key] = current_page
+
+    start = current_page * page_size
+    page_items = items[start:start + page_size]
+
+    st.markdown(
+        f"<div style='font-family:var(--font-mono);font-size:0.68rem;color:var(--text-muted);"
+        f"margin-bottom:8px;'>Showing {start+1}–{start+len(page_items)} of {total}</div>",
+        unsafe_allow_html=True
+    )
+    return page_items
+
+
+def paginated_controls(items, page_key: str, page_size: int = 10):
+    """Render pagination buttons after the items. Call after your item loop."""
+    total = len(items)
+    if total <= page_size:
+        return
+    total_pages = max(1, -(-total // page_size))
+    current_page = st.session_state.get(page_key, 0)
+
+    pg1, pg2, pg3 = st.columns([1, 3, 1])
+    with pg1:
+        if st.button("← Prev", use_container_width=True, key=f"{page_key}_prev",
+                     disabled=(current_page == 0)):
+            st.session_state[page_key] = current_page - 1
+            st.rerun()
+    with pg2:
+        st.markdown(
+            f"<div style='text-align:center;font-family:var(--font-mono);font-size:0.72rem;"
+            f"color:var(--text-muted);padding-top:8px;'>"
+            f"Page {current_page + 1} of {total_pages}</div>",
+            unsafe_allow_html=True
+        )
+    with pg3:
+        if st.button("Next →", use_container_width=True, key=f"{page_key}_next",
+                     disabled=(current_page >= total_pages - 1)):
+            st.session_state[page_key] = current_page + 1
+            st.rerun()

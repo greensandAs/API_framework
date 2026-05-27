@@ -1,4 +1,4 @@
-"""Tiger SnowSync — Ingestion Console page (4-zone redesign)."""
+"""Tiger SnowSync — Ingestion Console page."""
 import streamlit as st
 import pandas as pd
 
@@ -8,15 +8,15 @@ try:
 except Exception:
     _PLOTLY_OK = False
 
-from tiger.db import META, run_query
 from tiger.helpers import (
-    section_label, empty_state, dd_tile, cfg_card, styled_dataframe, stitch_row,
+    section_label, empty_state, dd_tile, cfg_card,
+    styled_dataframe, stitch_row,
 )
 from tiger.knowledge import ERROR_KNOWLEDGE
+from tiger.db import META, run_query
 
 
 def render() -> None:
-    """Render the Ingestion Console page."""
     section_label("SYSTEM TELEMETRY")
     st.header("Ingestion Console")
     st.caption("KPIs · time-series trend · per-API health · retry analysis · incidents.")
@@ -47,7 +47,8 @@ def render() -> None:
 
     with bar_c2:
         api_filter = st.multiselect(
-            "APIs", all_log_apis,
+            "APIs",
+            all_log_apis,
             placeholder="All APIs",
             label_visibility="collapsed",
             key="console_api_filter",
@@ -64,7 +65,6 @@ def render() -> None:
             st.cache_data.clear()
             st.rerun()
 
-    # Build WHERE
     where_parts = [time_pred]
     params = []
     if api_filter:
@@ -77,7 +77,6 @@ def render() -> None:
         where_parts.append("(STATUS_CODE IS NULL OR STATUS_CODE != 200)")
     where_sql = " AND ".join(where_parts)
 
-    # Active-filters chip bar
     api_chips = "".join(f"<span class='chip'>{a}</span>" for a in api_filter) if api_filter else "<span class='chip muted'>ALL APIs</span>"
     status_chip = ""
     if status_filter != "All":
@@ -87,10 +86,9 @@ def render() -> None:
         f"<span class='chip active'>⏱ LAST {time_range.upper()}</span>"
         f"{api_chips}{status_chip}"
         f"</div>",
-        unsafe_allow_html=True,
+        unsafe_allow_html=True
     )
 
-    # ─── KPI query (full window, no row limit) ───
     try:
         kpi = run_query(
             f"""
@@ -107,7 +105,7 @@ def render() -> None:
             FROM {META}.INGESTION_RESPONSE_LOG
             WHERE {where_sql}
             """,
-            params=params if params else None,
+            params=params if params else None
         ).iloc[0]
         total = int(kpi["TOTAL_CALLS"] or 0)
         ok = int(kpi["OK_CALLS"] or 0)
@@ -128,7 +126,6 @@ def render() -> None:
         empty_state("📭", "No log entries", f"Nothing recorded in the last {time_range} window.")
         return
 
-    # ─── ZONE 2 · KPI TILES ───
     try:
         ts_simple = run_query(
             f"""
@@ -140,7 +137,7 @@ def render() -> None:
             GROUP BY 1
             ORDER BY 1
             """,
-            params=params if params else None,
+            params=params if params else None
         )
         calls_series = ts_simple["CALLS"].tolist()[-24:] if not ts_simple.empty else None
         sr_series = (
@@ -189,7 +186,6 @@ def render() -> None:
 
     st.markdown("<div style='height:1.0rem'></div>", unsafe_allow_html=True)
 
-    # ─── ZONE 3 · TIME-SERIES CHART ───
     section_label("TIMELINE")
     try:
         ts_df = run_query(
@@ -204,7 +200,7 @@ def render() -> None:
             GROUP BY 1, 2
             ORDER BY 1
             """,
-            params=params if params else None,
+            params=params if params else None
         )
     except Exception as _e:
         ts_df = pd.DataFrame()
@@ -251,12 +247,10 @@ def render() -> None:
 
     st.markdown("<div style='height:0.8rem'></div>", unsafe_allow_html=True)
 
-    # ─── ZONE 4 · TABBED DETAIL PANELS ───
     tab_feed, tab_health, tab_retries, tab_errors, tab_intel = st.tabs([
         "📡  Activity Feed", "🏥  Per-API Health", "🔁  Retry Analysis", "🚨  Incidents", "🧠  Error Intelligence",
     ])
 
-    # — Activity Feed —
     with tab_feed:
         log_limit = st.slider("Show last N rows", 25, 500, 100, step=25, key="feed_limit")
         try:
@@ -269,7 +263,7 @@ def render() -> None:
                 ORDER BY INSERT_DATETIME_UTC DESC
                 LIMIT {int(log_limit)}
                 """,
-                params=params if params else None,
+                params=params if params else None
             )
         except Exception as _e:
             feed_logs = pd.DataFrame()
@@ -296,7 +290,6 @@ def render() -> None:
                                    row.get("API_URL") or "—",
                                    row.get("STATUS_CODE"))
 
-    # — Per-API Health —
     with tab_health:
         try:
             health_df = run_query(
@@ -312,7 +305,7 @@ def render() -> None:
                 GROUP BY API_NAME
                 ORDER BY (OK / NULLIF(CALLS, 0)) ASC NULLS FIRST
                 """,
-                params=params if params else None,
+                params=params if params else None
             )
         except Exception as _e:
             health_df = pd.DataFrame()
@@ -343,10 +336,9 @@ def render() -> None:
                     f"<div style='width:100%;height:3px;background:#1f1f1f;border-radius:2px;margin:-4px 0 8px;'>"
                     f"<div style='width:{sr_v}%;height:3px;background:{bar_color};border-radius:2px;'></div>"
                     f"</div>",
-                    unsafe_allow_html=True,
+                    unsafe_allow_html=True
                 )
 
-    # — Retry Analysis —
     with tab_retries:
         st.caption("Pages where the framework had to retry — including transient errors that eventually succeeded.")
         try:
@@ -380,7 +372,7 @@ def render() -> None:
                 ORDER BY RUN_STARTED_UTC DESC
                 LIMIT 200
                 """,
-                params=params if params else None,
+                params=params if params else None
             )
         except Exception as _e:
             retry_summary = pd.DataFrame()
@@ -406,9 +398,12 @@ def render() -> None:
             st.caption(f"Average attempts per retried page: **{avg_attempts:.2f}**")
 
             if _PLOTLY_OK:
+                funnel_total = len(retry_summary)
+                funnel_recovered = rec_count
+                funnel_exhausted = exh_count
                 fig_funnel = go.Figure(go.Funnel(
                     y=["Pages w/ retries", "Recovered", "Exhausted"],
-                    x=[len(retry_summary), rec_count, exh_count],
+                    x=[funnel_total, funnel_recovered, funnel_exhausted],
                     marker=dict(color=["#29B5E8", "#29B5E8", "#ef4444"]),
                     textinfo="value+percent initial",
                     connector=dict(line=dict(color="#1f1f1f", width=1)),
@@ -444,7 +439,7 @@ def render() -> None:
                         f"FROM {META}.INGESTION_RESPONSE_LOG "
                         f"WHERE API_NAME = ? AND PAGE_NUMBER = ? "
                         f"ORDER BY ATTEMPT_NUMBER",
-                        params=[sel_api, sel_page],
+                        params=[sel_api, sel_page]
                     )
                     if attempts_df.empty:
                         st.info("No attempt rows found.")
@@ -457,7 +452,6 @@ def render() -> None:
                 except Exception as _e:
                     st.error(f"Could not load attempt history: {_e}")
 
-    # — Incidents —
     with tab_errors:
         try:
             errors_df = run_query(
@@ -470,7 +464,7 @@ def render() -> None:
                 ORDER BY INSERT_DATETIME_UTC DESC
                 LIMIT 200
                 """,
-                params=params if params else None,
+                params=params if params else None
             )
         except Exception as _e:
             errors_df = pd.DataFrame()
@@ -491,15 +485,15 @@ def render() -> None:
                         f"<div class='name' style='font-size:0.8rem;'>{str(msg)[:160]}</div>"
                         f"<div class='meta'>{count} occurrence(s)</div>"
                         f"</div>",
-                        unsafe_allow_html=True,
+                        unsafe_allow_html=True
                     )
             st.divider()
             section_label("FULL INCIDENT LOG")
             styled_dataframe(errors_df)
 
-    # — Error Intelligence —
     with tab_intel:
-        st.caption("Each error code grouped, ranked, and explained.")
+        st.caption("Each error code grouped, ranked, and explained. Click any code for likely causes, actions, and a deep-link to the affected API config.")
+
         try:
             error_freq_df = run_query(
                 f"""
@@ -515,7 +509,7 @@ def render() -> None:
                 GROUP BY 1
                 ORDER BY OCCURRENCES DESC
                 """,
-                params=params if params else None,
+                params=params if params else None
             )
         except Exception as _e:
             error_freq_df = pd.DataFrame()
@@ -536,7 +530,7 @@ def render() -> None:
                 GROUP BY 1, 2
                 ORDER BY 1, OCCURRENCES DESC
                 """,
-                params=params if params else None,
+                params=params if params else None
             )
         except Exception:
             error_api_df = pd.DataFrame()
@@ -626,7 +620,7 @@ def render() -> None:
                                   <div style='font-family:var(--font-mono);font-size:0.65rem;color:#29B5E8;font-weight:700;letter-spacing:1px;margin-bottom:4px;'>❄️ SNOWFLAKE TIP</div>
                                   <div style='font-size:0.78rem;color:var(--text-secondary);'>{kb["snowflake_tip"]}</div>
                                 </div>""",
-                                unsafe_allow_html=True,
+                                unsafe_allow_html=True
                             )
 
                         if not error_api_df.empty:

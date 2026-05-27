@@ -254,8 +254,68 @@ def _humanize_cron(expr: str) -> str:
         return f"CRON: {expr}"
 
 
+def _expand_cron_field(expr: str, lo: int, hi: int):
+    """Expand a single CRON field into a sorted list of valid integer values.
+    Supports: '*', '*/N', 'a-b', 'a,b,c', 'N', and combinations like '1-5,7'.
+    """
+    if expr is None or expr == "":
+        return list(range(lo, hi + 1))
+    expr = expr.strip()
+    if expr == "*":
+        return list(range(lo, hi + 1))
+    out = set()
+    for part in expr.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        # Step: */N or a-b/N
+        if "/" in part:
+            range_part, step_part = part.split("/", 1)
+            try:
+                step = int(step_part)
+            except Exception:
+                continue
+            if range_part == "*":
+                start, end = lo, hi
+            elif "-" in range_part:
+                a, b = range_part.split("-", 1)
+                try:
+                    start, end = int(a), int(b)
+                except Exception:
+                    continue
+            else:
+                try:
+                    start = int(range_part)
+                    end = hi
+                except Exception:
+                    continue
+            for v in range(start, end + 1, max(step, 1)):
+                if lo <= v <= hi:
+                    out.add(v)
+        elif "-" in part:
+            a, b = part.split("-", 1)
+            try:
+                a, b = int(a), int(b)
+                for v in range(a, b + 1):
+                    if lo <= v <= hi:
+                        out.add(v)
+            except Exception:
+                continue
+        else:
+            try:
+                v = int(part)
+                if lo <= v <= hi:
+                    out.add(v)
+            except Exception:
+                continue
+    return sorted(out)
+
+
 def _parse_next_runs(tasks_df, horizon_hours: int = 24):
-    """Return list of {task, warehouse, time, hour_offset} for the next N hours."""
+    """Return list of {task, warehouse, time, hour_offset} for the next N hours.
+    Handles interval schedules (N MINUTE/HOUR/DAY) and full CRON expressions
+    (5-field) with *, */N, ranges, and lists.
+    """
     if tasks_df is None or tasks_df.empty:
         return []
     now = datetime.utcnow()
@@ -267,6 +327,8 @@ def _parse_next_runs(tasks_df, horizon_hours: int = 24):
         wh = str(t.get("WAREHOUSE") or "")
         if state != "started" or not sched:
             continue
+
+        # ── Interval ────────────────────────────────────────
         m = re.match(r"(\d+)\s*(MINUTE|HOUR|DAY)", sched, re.IGNORECASE)
         if m:
             qty = int(m.group(1))
@@ -282,16 +344,48 @@ def _parse_next_runs(tasks_df, horizon_hours: int = 24):
                         "hour_offset": (t_next - now).total_seconds() / 3600,
                     })
             continue
-        c = re.match(r"USING CRON\s+(\S+)\s+(\S+)", sched, re.IGNORECASE)
-        if c and c.group(2).isdigit():
-            h = int(c.group(2))
-            for d_off in (0, 1):
-                t_cand = now.replace(hour=h, minute=0, second=0, microsecond=0) + pd.Timedelta(days=d_off)
-                if now < t_cand < now + pd.Timedelta(hours=horizon_hours):
-                    events.append({
-                        "task": name, "warehouse": wh, "time": t_cand,
-                        "hour_offset": (t_cand - now).total_seconds() / 3600,
-                    })
+
+        # ── CRON ────────────────────────────────────────────
+        c = re.match(r"USING CRON\s+(.+?)\s+(\S+)\s*$", sched, re.IGNORECASE)
+        if c:
+            cron_str = c.group(1).strip()
+            parts = cron_str.split()
+            if len(parts) != 5:
+                continue
+            try:
+                minutes = _expand_cron_field(parts[0], 0, 59)
+                hours = _expand_cron_field(parts[1], 0, 23)
+                doms = _expand_cron_field(parts[2], 1, 31)
+                months = _expand_cron_field(parts[3], 1, 12)
+                # CRON DOW: 0 or 7 = Sunday. Python weekday(): Mon=0..Sun=6.
+                dows_raw = _expand_cron_field(parts[4], 0, 7)
+                dows = set()
+                for d in dows_raw:
+                    py_dow = (d - 1) % 7  # convert: 0/7=Sun→6, 1=Mon→0, ..., 6=Sat→5
+                    dows.add(py_dow)
+            except Exception:
+                continue
+
+            limit = now + pd.Timedelta(hours=horizon_hours)
+            cur = now.replace(second=0, microsecond=0)
+            # iterate minute-by-minute? Too expensive. Iterate over (hour, minute) candidates per day.
+            for d_off in range(0, max(2, (horizon_hours // 24) + 2)):
+                day = (cur + pd.Timedelta(days=d_off)).to_pydatetime() if hasattr((cur + pd.Timedelta(days=d_off)), "to_pydatetime") else (cur + pd.Timedelta(days=d_off))
+                if day.month not in months:
+                    continue
+                if day.day not in doms:
+                    continue
+                # CRON: if both DOM and DOW are restricted (not '*'), match if EITHER. Here we just AND DOW.
+                if day.weekday() not in dows:
+                    continue
+                for h in hours:
+                    for mn in minutes:
+                        cand = day.replace(hour=h, minute=mn, second=0, microsecond=0)
+                        if now < cand <= limit:
+                            events.append({
+                                "task": name, "warehouse": wh, "time": cand,
+                                "hour_offset": (cand - now).total_seconds() / 3600,
+                            })
     return sorted(events, key=lambda x: x["time"])
 
 

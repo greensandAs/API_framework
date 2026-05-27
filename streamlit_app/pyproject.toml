@@ -9,7 +9,8 @@ version = "0.0.1"
 description = ""
 dependencies = [
     "streamlit[snowflake]",
-    "streamlit-searchbox"
+    "streamlit-searchbox",
+    "plotly"
 ]
 
 [tool.uv]

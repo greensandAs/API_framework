@@ -17,6 +17,7 @@ from tiger.db import (
 )
 from tiger.helpers import (
     section_label, empty_state, dd_tile, cfg_card, styled_dataframe,
+    paginated_items, paginated_controls,
 )
 from tiger.knowledge import (
     _humanize_schedule, _humanize_cron, _parse_next_runs,
@@ -58,48 +59,52 @@ def render(default_warehouse: str = "COMPUTE_WH") -> None:
         wh_options = [default_warehouse]
 
     # ╔══════════════════ ZONE 1 · COMMAND BAR ══════════════════╗
-    cmd_left, cmd_right = st.columns([4, 1])
-    with cmd_left:
-        if task_names:
-            bc1, bc2, bc3 = st.columns(3)
-            with bc1:
-                if st.button("▶ Resume All", use_container_width=True, key="bulk_resume"):
-                    cnt = 0
-                    for tn in task_names:
-                        try:
-                            exec_sql(f"ALTER TASK {META}.{tn} RESUME")
-                            cnt += 1
-                        except Exception:
-                            pass
-                    st.toast(f"Resumed {cnt}/{len(task_names)} tasks", icon="▶")
-                    time.sleep(0.4); st.rerun()
-            with bc2:
-                if st.button("⏸ Suspend All", use_container_width=True, key="bulk_suspend"):
-                    cnt = 0
-                    for tn in task_names:
-                        try:
-                            exec_sql(f"ALTER TASK {META}.{tn} SUSPEND")
-                            cnt += 1
-                        except Exception:
-                            pass
-                    st.toast(f"Suspended {cnt}/{len(task_names)} tasks", icon="⏸")
-                    time.sleep(0.4); st.rerun()
-            with bc3:
-                if st.button("🚀 Execute All Now", use_container_width=True, key="bulk_execute"):
-                    cnt = 0
-                    for tn in task_names:
-                        try:
-                            exec_sql(f"EXECUTE TASK {META}.{tn}")
-                            cnt += 1
-                        except Exception:
-                            pass
-                    st.toast(f"Fired {cnt}/{len(task_names)} tasks", icon="🚀")
-        else:
+    if task_names:
+        bc1, bc2, bc3, bc4 = st.columns([1, 1, 1, 1])
+        with bc1:
+            if st.button("▶ Resume All", use_container_width=True, key="bulk_resume"):
+                cnt = 0
+                for tn in task_names:
+                    try:
+                        exec_sql(f"ALTER TASK {META}.{tn} RESUME")
+                        cnt += 1
+                    except Exception:
+                        pass
+                st.toast(f"Resumed {cnt}/{len(task_names)} tasks", icon="▶")
+                time.sleep(0.4); st.rerun()
+        with bc2:
+            if st.button("⏸ Suspend All", use_container_width=True, key="bulk_suspend"):
+                cnt = 0
+                for tn in task_names:
+                    try:
+                        exec_sql(f"ALTER TASK {META}.{tn} SUSPEND")
+                        cnt += 1
+                    except Exception:
+                        pass
+                st.toast(f"Suspended {cnt}/{len(task_names)} tasks", icon="⏸")
+                time.sleep(0.4); st.rerun()
+        with bc3:
+            if st.button("🚀 Execute All Now", use_container_width=True, key="bulk_execute"):
+                cnt = 0
+                for tn in task_names:
+                    try:
+                        exec_sql(f"EXECUTE TASK {META}.{tn}")
+                        cnt += 1
+                    except Exception:
+                        pass
+                st.toast(f"Fired {cnt}/{len(task_names)} tasks", icon="🚀")
+        with bc4:
+            if st.button("＋ New Schedule", type="primary", use_container_width=True, key="open_create_dialog"):
+                st.session_state["create_task_open"] = True
+                st.rerun()
+    else:
+        nc1, nc2 = st.columns([3, 1])
+        with nc1:
             st.caption("No tasks yet — click **＋ New Schedule** to create your first one.")
-    with cmd_right:
-        st.write("")
-        if st.button("＋ New Schedule", type="primary", use_container_width=True, key="open_create_dialog"):
-            st.session_state["create_task_open"] = not st.session_state.get("create_task_open", False)
+        with nc2:
+            if st.button("＋ New Schedule", type="primary", use_container_width=True, key="open_create_dialog_empty"):
+                st.session_state["create_task_open"] = True
+                st.rerun()
 
     # ╔════════════════════ ZONE 2 · KPI TILES ════════════════════╗
     if not tasks_df.empty:
@@ -205,13 +210,15 @@ def render(default_warehouse: str = "COMPUTE_WH") -> None:
             for c1, c2 in conflicts:
                 mid_t = c1["time"] + (c2["time"] - c1["time"]) / 2
                 fig_tl.add_vline(
-                    x=mid_t, line=dict(color="#ef4444", width=1, dash="dot"),
+                    x=mid_t.timestamp() * 1000,
+                    line=dict(color="#ef4444", width=1, dash="dot"),
                     annotation_text="⚠ contention",
                     annotation_font=dict(color="#ef4444", size=9),
                 )
 
             fig_tl.add_vline(
-                x=datetime.utcnow(), line=dict(color="#29B5E8", width=1.5, dash="dash"),
+                x=datetime.utcnow().timestamp() * 1000,
+                line=dict(color="#29B5E8", width=1.5, dash="dash"),
                 annotation_text="NOW",
                 annotation_font=dict(color="#29B5E8", size=9, family="JetBrains Mono"),
             )
@@ -298,7 +305,9 @@ def render(default_warehouse: str = "COMPUTE_WH") -> None:
             except Exception:
                 pass
 
-        for _, t in filtered_tasks.iterrows():
+        _task_rows = list(filtered_tasks.iterrows())
+        _task_page = paginated_items(_task_rows, "pg_task_cards", page_size=10)
+        for _, t in _task_page:
             t_name = t.get("NAME", "—")
             t_state = (t.get("STATE") or "").lower()
             t_sched = str(t.get("SCHEDULE") or "—")
@@ -440,6 +449,8 @@ def render(default_warehouse: str = "COMPUTE_WH") -> None:
 
             st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
+        paginated_controls(_task_rows, "pg_task_cards", page_size=10)
+
         # ╔══════════════════ ZONE 5 · EXECUTION HISTORY ══════════════════╗
         st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
         section_label("EXECUTION HISTORY")
@@ -478,7 +489,7 @@ def render(default_warehouse: str = "COMPUTE_WH") -> None:
                 SELECT NAME, STATE, SCHEDULED_TIME, COMPLETED_TIME,
                        TIMESTAMPDIFF(SECOND, SCHEDULED_TIME, COMPLETED_TIME) AS DURATION_SEC,
                        ERROR_CODE, ERROR_MESSAGE, QUERY_ID
-                FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(
+                FROM TABLE(API_DATA_PIPELINE.INFORMATION_SCHEMA.TASK_HISTORY(
                     SCHEDULED_TIME_RANGE_START => DATEADD('{HIST_WIN[0]}', -{HIST_WIN[1]}, CURRENT_TIMESTAMP()),
                     RESULT_LIMIT => {hist_limit}
                 ))
@@ -488,6 +499,14 @@ def render(default_warehouse: str = "COMPUTE_WH") -> None:
         except Exception as _e:
             full_hist = pd.DataFrame()
             st.caption(f"History unavailable: {_e}")
+
+        if full_hist.empty:
+            st.info(
+                f"No task runs in the last {hist_window}. "
+                f"Possible reasons: (1) tasks are suspended and haven't fired yet, "
+                f"(2) task names don't start with `TASK_INGEST_`, or "
+                f"(3) the time window is too short — try widening to 7d."
+            )
 
         ht_timeline, ht_table, ht_failures = st.tabs(["📈 Run Timeline", "📋 Run Log", "🚨 Failures"])
 
@@ -569,122 +588,117 @@ def render(default_warehouse: str = "COMPUTE_WH") -> None:
                             st.caption(f"Query ID: `{qid}`")
                     st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
 
-    # ╔══════════════════ ZONE 6 · NEW SCHEDULE ══════════════════╗
-    if st.session_state.get("create_task_open"):
-        st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
-        with st.container(border=True):
-            section_label("＋ CREATE NEW SCHEDULE")
-            nc1, nc2 = st.columns(2)
-            with nc1:
-                st.markdown("#### 🎯 Target")
-                target_api_v2 = st.selectbox("API to schedule", api_options, key="sch_api_v2")
+    # ╔══════════════════ ZONE 6 · NEW SCHEDULE (DIALOG) ══════════════════╗
+    @st.dialog("＋ Create New Schedule", width="large")
+    def _create_schedule_dialog():
+        def _on_api_change():
+            api_val = st.session_state.get("dlg_sch_api", "")
+            st.session_state["dlg_sch_name"] = f"TASK_INGEST_{api_val}" if api_val else "TASK_INGEST_"
 
-                suggested = f"TASK_INGEST_{target_api_v2}" if target_api_v2 else "TASK_INGEST_"
-                if "last_target_api_v2" not in st.session_state:
-                    st.session_state["last_target_api_v2"] = target_api_v2
-                    st.session_state["sch_name_v2"] = suggested
-                if target_api_v2 != st.session_state["last_target_api_v2"]:
-                    st.session_state["last_target_api_v2"] = target_api_v2
-                    st.session_state["sch_name_v2"] = suggested
-                    st.rerun()
+        def _on_preset_change():
+            _presets = {
+                "Custom": "", "Every hour": "0 * * * *",
+                "Every 6 hours": "0 */6 * * *", "Daily at 2am": "0 2 * * *",
+                "Daily at midnight": "0 0 * * *", "Weekdays at 6am": "0 6 * * 1-5",
+            }
+            chosen = st.session_state.get("dlg_cron_preset", "Custom")
+            if _presets.get(chosen):
+                st.session_state["dlg_sch_cron"] = _presets[chosen]
 
-                task_name_new = st.text_input("Task name", key="sch_name_v2")
-                if task_name_new in task_names:
-                    st.warning(f"A task `{task_name_new}` already exists. Creating will replace it.")
-                pref_wh_v2 = st.session_state.get("pref_warehouse", default_warehouse)
-                task_wh_new = st.selectbox(
-                    "Warehouse",
-                    wh_options,
-                    index=wh_options.index(pref_wh_v2) if pref_wh_v2 in wh_options else 0,
-                    key="sch_wh_v2",
+        nc1, nc2 = st.columns(2)
+        with nc1:
+            st.markdown("#### 🎯 Target")
+            if "dlg_sch_name" not in st.session_state:
+                st.session_state["dlg_sch_name"] = f"TASK_INGEST_{api_options[0]}" if api_options else "TASK_INGEST_"
+            target_api_v2 = st.selectbox("API to schedule", api_options, key="dlg_sch_api", on_change=_on_api_change)
+
+            task_name_new = st.text_input("Task name", key="dlg_sch_name")
+            if task_name_new in task_names:
+                st.warning(f"A task `{task_name_new}` already exists. Creating will replace it.")
+            pref_wh_v2 = st.session_state.get("pref_warehouse", default_warehouse)
+            task_wh_new = st.selectbox(
+                "Warehouse",
+                wh_options,
+                index=wh_options.index(pref_wh_v2) if pref_wh_v2 in wh_options else 0,
+                key="dlg_sch_wh",
+            )
+            if not tasks_df.empty and "WAREHOUSE" in tasks_df.columns:
+                tasks_on_wh = tasks_df[tasks_df["WAREHOUSE"] == task_wh_new]["NAME"].tolist()
+                if tasks_on_wh:
+                    st.caption(f"ℹ {len(tasks_on_wh)} existing task(s) use this warehouse — stagger schedules to avoid contention.")
+        with nc2:
+            st.markdown("#### ⏱ Schedule")
+            sched_type_v2 = st.radio("Type", ["Interval", "CRON"], horizontal=True, key="dlg_sch_type")
+            schedule_clause_v2 = ""
+            if sched_type_v2 == "Interval":
+                cqty, cunit = st.columns(2)
+                with cqty:
+                    sched_qty = st.number_input("Every", min_value=1, value=60, key="dlg_sch_qty")
+                with cunit:
+                    sched_unit = st.selectbox("Unit", ["MINUTE", "HOUR"], key="dlg_sch_unit")
+                schedule_clause_v2 = f"{sched_qty} {sched_unit}"
+                st.caption(_humanize_schedule(schedule_clause_v2))
+            else:
+                cron_presets = {
+                    "Custom": "",
+                    "Every hour": "0 * * * *",
+                    "Every 6 hours": "0 */6 * * *",
+                    "Daily at 2am": "0 2 * * *",
+                    "Daily at midnight": "0 0 * * *",
+                    "Weekdays at 6am": "0 6 * * 1-5",
+                }
+                preset = st.selectbox("Preset", list(cron_presets.keys()), key="dlg_cron_preset", on_change=_on_preset_change)
+                cron_val = st.text_input(
+                    "CRON expression",
+                    key="dlg_sch_cron",
+                    placeholder="min hr dom mon dow",
                 )
-                if not tasks_df.empty and "WAREHOUSE" in tasks_df.columns:
-                    tasks_on_wh = tasks_df[tasks_df["WAREHOUSE"] == task_wh_new]["NAME"].tolist()
-                    if tasks_on_wh:
-                        st.caption(f"ℹ {len(tasks_on_wh)} existing task(s) use this warehouse — stagger schedules to avoid contention.")
-            with nc2:
-                st.markdown("#### ⏱ Schedule")
-                sched_type_v2 = st.radio("Type", ["Interval", "CRON"], horizontal=True, key="sch_type_v2")
-                schedule_clause_v2 = ""
-                if sched_type_v2 == "Interval":
-                    cqty, cunit = st.columns(2)
-                    with cqty:
-                        sched_qty = st.number_input("Every", min_value=1, value=60, key="sch_qty")
-                    with cunit:
-                        sched_unit = st.selectbox("Unit", ["MINUTE", "HOUR"], key="sch_unit")
-                    schedule_clause_v2 = f"{sched_qty} {sched_unit}"
-                    st.caption(_humanize_schedule(schedule_clause_v2))
-                else:
-                    cron_presets = {
-                        "Custom": "",
-                        "Every hour": "0 * * * *",
-                        "Every 6 hours": "0 */6 * * *",
-                        "Daily at 2am": "0 2 * * *",
-                        "Daily at midnight": "0 0 * * *",
-                        "Weekdays at 6am": "0 6 * * 1-5",
-                    }
-                    preset = st.selectbox("Preset", list(cron_presets.keys()), key="cron_preset")
+                tz_val = st.text_input("Timezone", value="UTC", key="dlg_sch_tz")
+                if cron_val:
+                    st.caption(_humanize_cron(cron_val))
+                    if len(cron_val.split()) != 5:
+                        st.error("CRON must have exactly 5 fields: min hr dom mon dow")
+                schedule_clause_v2 = f"USING CRON {cron_val} {tz_val}" if cron_val else ""
 
-                    if "last_cron_preset" not in st.session_state:
-                        st.session_state["last_cron_preset"] = "Custom"
-                    if preset != st.session_state["last_cron_preset"]:
-                        st.session_state["last_cron_preset"] = preset
-                        if cron_presets[preset]:
-                            st.session_state["sch_cron_v2"] = cron_presets[preset]
-                            st.rerun()
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+            create_suspended_v2 = st.checkbox(
+                "Create as SUSPENDED (resume manually)", value=True, key="dlg_sch_susp"
+            )
+            auto_suspend_v2 = st.number_input(
+                "Auto-suspend after N consecutive failures (0 = never)",
+                min_value=0, value=3, key="dlg_sch_auto_susp",
+            )
 
-                    cron_val = st.text_input(
-                        "CRON expression",
-                        key="sch_cron_v2",
-                        placeholder="min hr dom mon dow",
+        st.divider()
+        ac_create, ac_cancel = st.columns(2)
+        with ac_create:
+            if st.button(
+                "Create Schedule", type="primary",
+                use_container_width=True, key="dlg_btn_create",
+                disabled=not (target_api_v2 and task_name_new and schedule_clause_v2),
+            ):
+                try:
+                    susp_clause = (
+                        f"SUSPEND_TASK_AFTER_NUM_FAILURES = {auto_suspend_v2}"
+                        if auto_suspend_v2 > 0 else ""
                     )
-                    tz_val = st.text_input("Timezone", value="UTC", key="sch_tz_v2")
-                    if cron_val:
-                        st.caption(_humanize_cron(cron_val))
-                        if len(cron_val.split()) != 5:
-                            st.error("CRON must have exactly 5 fields: min hr dom mon dow")
-                    schedule_clause_v2 = f"USING CRON {cron_val} {tz_val}" if cron_val else ""
-
-                st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-                create_suspended_v2 = st.checkbox(
-                    "Create as SUSPENDED (resume manually)", value=True, key="sch_susp_v2"
-                )
-                auto_suspend_v2 = st.number_input(
-                    "Auto-suspend after N consecutive failures (0 = never)",
-                    min_value=0, value=3, key="sch_auto_susp",
-                )
-
-            ac_create, ac_cancel, _ = st.columns([1, 1, 2])
-            with ac_create:
-                if st.button(
-                    "Create Schedule", type="primary",
-                    use_container_width=True, key="btn_create_task_v2",
-                    disabled=not (target_api_v2 and task_name_new and schedule_clause_v2),
-                ):
-                    try:
-                        susp_clause = (
-                            f"SUSPEND_TASK_AFTER_NUM_FAILURES = {auto_suspend_v2}"
-                            if auto_suspend_v2 > 0 else ""
-                        )
-                        exec_sql(
-                            f"CREATE OR REPLACE TASK {META}.{task_name_new} "
-                            f"WAREHOUSE = {task_wh_new} "
-                            f"SCHEDULE = '{schedule_clause_v2}' "
-                            f"{susp_clause} "
-                            f"AS CALL {META}.USP_UNIVERSAL_INGESTOR('{escape_sql_literal(target_api_v2)}')"
-                        )
-                        if not create_suspended_v2:
-                            exec_sql(f"ALTER TASK {META}.{task_name_new} RESUME")
-                        st.toast(
-                            f"Task '{task_name_new}' created"
-                            f"{' and running' if not create_suspended_v2 else ' (suspended)'}",
-                            icon="⏱",
-                        )
-                        st.session_state["create_task_open"] = False
-                        time.sleep(0.4); st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
-            with ac_cancel:
-                if st.button("Cancel", use_container_width=True, key="btn_cancel_task_v2"):
+                    exec_sql(
+                        f"CREATE OR REPLACE TASK {META}.{task_name_new} "
+                        f"WAREHOUSE = {task_wh_new} "
+                        f"SCHEDULE = '{schedule_clause_v2}' "
+                        f"{susp_clause} "
+                        f"AS CALL {META}.USP_UNIVERSAL_INGESTOR('{escape_sql_literal(target_api_v2)}')"
+                    )
+                    if not create_suspended_v2:
+                        exec_sql(f"ALTER TASK {META}.{task_name_new} RESUME")
                     st.session_state["create_task_open"] = False
                     st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+        with ac_cancel:
+            if st.button("Cancel", use_container_width=True, key="dlg_btn_cancel"):
+                st.session_state["create_task_open"] = False
+                st.rerun()
+
+    if st.session_state.get("create_task_open"):
+        _create_schedule_dialog()
