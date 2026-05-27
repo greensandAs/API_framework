@@ -1,8 +1,11 @@
-# API Ingestion Framework — User Guide
+# 🐅 Tiger SnowSync — User Guide
+### Accelerating API Ingestion for the Data Den
+
+**Tiger SnowSync** is a **Tiger Analytics** enterprise accelerator: a metadata-driven, native Snowflake pipeline for ingesting external REST APIs without leaving the Snowflake ecosystem.
 
 ## Overview
 
-This Streamlit app is a management UI for a **config-driven API ingestion pipeline** in Snowflake. It lets you register external REST APIs, manage credentials and network access, run ingestion (full or incremental), monitor every retry, and turn the landed JSON into flattened SQL views — all without writing SQL.
+This Streamlit app is the management UI for the Tiger SnowSync ingestion pipeline. It lets you register external REST APIs, manage credentials and network access, run ingestion (full or incremental), monitor every retry, and turn the landed JSON into flattened SQL views — all without writing SQL.
 
 ### Architecture
 
