@@ -436,8 +436,13 @@ def _ds_collect_records(payload, records_path: str):
             if isinstance(cur, dict) and part in cur:
                 cur = cur[part]
             else:
+                if isinstance(payload, list):
+                    cur = payload
+                    break
                 return []
     if isinstance(cur, list):
+        if len(cur) == 1 and isinstance(cur[0], list):
+            cur = cur[0]
         return cur
     if isinstance(cur, dict):
         return [cur]

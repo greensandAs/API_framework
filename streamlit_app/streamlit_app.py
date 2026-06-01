@@ -23,10 +23,8 @@ _LOGO_PATH = "Tiger_Snow_sync_logo_new.png"
 _logo_b64 = _load_logo_b64(_LOGO_PATH)
 _logo_uri = f"data:image/png;base64,{_logo_b64}" if _logo_b64 else ""
 
-# Snowpark session
 session = get_session()
 
-# ─── Sidebar nav + topbar ───
 from tiger.sidebar import get_session_context, render_sidebar, render_topbar
 
 _user, _role, _wh = get_session_context()
@@ -37,30 +35,31 @@ render_topbar(nav_choice, _wh)
 # ─────────────────────────────────────────────
 # Router
 # ─────────────────────────────────────────────
-if nav_choice == "Manage API Configs":
-    from tiger.pages import config as page_config
-    page_config.render()
+def _render_page(page_name, module_path, **kwargs):
+    try:
+        import importlib
+        mod = importlib.import_module(module_path)
+        mod.render(**kwargs)
+    except ImportError as e:
+        st.error(f"Failed to load {page_name}: {str(e)}")
+    except Exception as e:
+        st.error(f"Error rendering {page_name}")
+        st.exception(e)
 
-elif nav_choice == "Manage Secrets & EAI":
-    from tiger.pages import secrets as page_secrets
-    page_secrets.render()
 
-elif nav_choice == "Run Ingestion":
-    from tiger.pages import run as page_run
-    page_run.render(default_warehouse=_wh)
+_PAGES = {
+    "Manage API Configs":   ("tiger.pages.config",    {}),
+    "Manage Secrets & EAI": ("tiger.pages.secrets",   {}),
+    "Run Ingestion":        ("tiger.pages.run",       {"default_warehouse": _wh}),
+    "Ingestion Console":    ("tiger.pages.console",   {}),
+    "Data Explorer":        ("tiger.pages.explorer",  {}),
+    "Task Scheduler":       ("tiger.pages.scheduler", {"default_warehouse": _wh}),
+    "Pipeline Overview":    ("tiger.pages.help",      {}),
+}
 
-elif nav_choice == "Ingestion Console":
-    from tiger.pages import console as page_console
-    page_console.render()
-
-elif nav_choice == "Data Explorer":
-    from tiger.pages import explorer as page_explorer
-    page_explorer.render()
-
-elif nav_choice == "Task Scheduler":
-    from tiger.pages import scheduler as page_scheduler
-    page_scheduler.render(default_warehouse=_wh)
-
-elif nav_choice == "Pipeline Overview":
-    from tiger.pages import help as page_help
-    page_help.render()
+if nav_choice in _PAGES:
+    module_path, kwargs = _PAGES[nav_choice]
+    _render_page(nav_choice, module_path, **kwargs)
+else:
+    st.warning(f"Unknown page: {nav_choice}")
+    st.info("Select a page from the sidebar.")

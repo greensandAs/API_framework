@@ -1,6 +1,6 @@
 """Tiger SnowSync — Manage API Configs page."""
 import re
-import time
+import json
 
 import streamlit as st
 import pandas as pd
@@ -22,6 +22,14 @@ from tiger.db import (
     get_secrets_df, get_allowed_hosts,
     extract_url_host, check_host_allowed,
 )
+
+
+def _is_valid_json(s):
+    try:
+        json.loads(s)
+        return True
+    except Exception:
+        return False
 
 
 def render() -> None:
@@ -99,22 +107,37 @@ def render() -> None:
         api_stats = {}
         try:
             stats_df = run_query(
-                f"SELECT API_NAME, "
-                f"  MAX(INSERT_DATETIME_UTC) AS LAST_RUN, "
-                f"  COUNT(*) AS TOTAL_CALLS, "
-                f"  SUM(CASE WHEN STATUS_CODE = 200 THEN 1 ELSE 0 END) AS OK_CALLS "
-                f"FROM {META}.INGESTION_RESPONSE_LOG "
-                f"WHERE INSERT_DATETIME_UTC >= DATEADD('DAY', -7, CURRENT_TIMESTAMP()) "
-                f"GROUP BY API_NAME"
+                f"SELECT API_NAME, LAST_RUN_TIME AS LAST_RUN, "
+                f"LAST_RUN_RECORDS AS TOTAL_CALLS, "
+                f"LAST_RUN_STATUS "
+                f"FROM {META}.V_ACTIVE_API_STATUS"
             )
             for _, sr in stats_df.iterrows():
+                total = int(sr.get("TOTAL_CALLS") or 0) if not pd.isna(sr.get("TOTAL_CALLS")) else 0
                 api_stats[sr["API_NAME"]] = {
                     "last_run": sr.get("LAST_RUN"),
-                    "total":    int(sr.get("TOTAL_CALLS") or 0),
-                    "ok":       int(sr.get("OK_CALLS") or 0),
+                    "total":    total,
+                    "ok":       total if sr.get("LAST_RUN_STATUS") == "SUCCESS" else 0,
                 }
-        except Exception as _stats_e:
-            st.caption(f"Stats rollup unavailable: {str(_stats_e)}")
+        except Exception:
+            try:
+                stats_df = run_query(
+                    f"SELECT API_NAME, "
+                    f"  MAX(INSERT_DATETIME_UTC) AS LAST_RUN, "
+                    f"  COUNT(*) AS TOTAL_CALLS, "
+                    f"  SUM(CASE WHEN STATUS_CODE = 200 THEN 1 ELSE 0 END) AS OK_CALLS "
+                    f"FROM {META}.INGESTION_RESPONSE_LOG "
+                    f"WHERE INSERT_DATETIME_UTC >= DATEADD('DAY', -7, CURRENT_TIMESTAMP()) "
+                    f"GROUP BY API_NAME"
+                )
+                for _, sr in stats_df.iterrows():
+                    api_stats[sr["API_NAME"]] = {
+                        "last_run": sr.get("LAST_RUN"),
+                        "total":    int(sr.get("TOTAL_CALLS") or 0),
+                        "ok":       int(sr.get("OK_CALLS") or 0),
+                    }
+            except Exception as _stats_e:
+                st.caption(f"Stats rollup unavailable: {str(_stats_e)}")
 
         filt_col, search_col = st.columns([3, 2])
         with filt_col:
@@ -137,15 +160,20 @@ def render() -> None:
                     placeholder="🔍  Search APIs…",
                     key="cfg_searchbox",
                     clear_on_submit=False,
+                    default_options=all_api_names[:20],
                 )
                 st.session_state["cfg_search"] = picked or ""
             else:
-                st.text_input(
+                search_options = [""] + all_api_names
+                picked = st.selectbox(
                     "🔍  Search APIs",
-                    key="cfg_search",
-                    placeholder="Filter by name…",
+                    search_options,
+                    index=0,
+                    key="cfg_search_select",
+                    placeholder="Search or select an API…",
                     label_visibility="collapsed",
                 )
+                st.session_state["cfg_search"] = picked or ""
 
         st.markdown(
             f"<div class='chip-bar'>"
@@ -310,6 +338,9 @@ def render() -> None:
 
             endpoint_url = st.text_input("ENDPOINT_URL", key=f"new_url_{fv}")
 
+            if endpoint_url and not endpoint_url.startswith(("http://", "https://")):
+                st.warning("URL should start with `http://` or `https://`")
+
             url_allowed = True
             url_match_reason = ""
             if endpoint_url:
@@ -336,7 +367,11 @@ def render() -> None:
                     key=f"new_url_override_{fv}"
                 )
 
-            http_method = st.selectbox("HTTP_METHOD", ["GET", "POST", "PUT", "DELETE"], key=f"new_method_{fv}")
+            http_method = st.selectbox("HTTP_METHOD", ["GET", "POST"], key=f"new_method_{fv}",
+                                         help="GET = standard REST fetch. POST = query-style APIs (GraphQL, HubSpot Search, Salesforce Bulk).")
+
+            if http_method == "POST":
+                st.info("**POST is for query-style APIs only.** Use when the API requires a JSON body to describe what data to fetch.")
 
         st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
 
@@ -386,6 +421,26 @@ def render() -> None:
 
         st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
 
+        request_body_raw = None
+        if http_method == "POST":
+            st.markdown("#### 📝  Step 2b: Query Body")
+            with st.container(border=True):
+                section_label("REQUEST BODY (POST)")
+                request_body_raw = st.text_area(
+                    "REQUEST_BODY_JSON",
+                    placeholder='{\n  "query": "{ users { id name email } }"\n}',
+                    height=120,
+                    key=f"new_req_body_{fv}",
+                    help="JSON body sent with every POST request to query the API."
+                )
+                if request_body_raw:
+                    try:
+                        json.loads(request_body_raw)
+                        st.caption("✓ Valid JSON body")
+                    except Exception as e:
+                        st.error(f"Invalid JSON: {str(e)}")
+            st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
+
         st.markdown("#### 📊  Step 3: Data Strategy")
         with st.container(border=True):
             landing_tables_list = []
@@ -415,13 +470,109 @@ def render() -> None:
             else:
                 landing_table = landing_choice
 
-            pagination_type = st.selectbox("PAGINATION_TYPE", ["NONE", "PAGE", "OFFSET"], key=f"new_pag_type_{fv}")
+            pagination_type = st.selectbox(
+                "PAGINATION_TYPE",
+                ["NONE", "PAGE", "OFFSET", "CURSOR", "LINK"],
+                key=f"new_pag_type_{fv}",
+                help="NONE: single fetch · PAGE: ?page=1,2,3 · OFFSET: ?offset=0,100 · CURSOR: next_token · LINK: follows Link header (GitHub/GitLab)"
+            )
             page_param = None
+            page_size = 100
+            limit_param = "limit"
             start_index = 1
+            cursor_param = ""
+            cursor_path = ""
+            has_more_path = ""
+            total_pages_path = ""
+            max_pages = 10000
+            records_path = "data"
 
-            if pagination_type != "NONE":
-                page_param = st.text_input("PAGE_PARAM", key=f"new_page_param_{fv}")
+            if pagination_type == "NONE":
+                st.caption("Single fetch — no pagination applied.")
+
+            elif pagination_type in ("PAGE", "OFFSET"):
+                pg_c1, pg_c2, pg_c3 = st.columns(3)
+                with pg_c1:
+                    page_param = st.text_input(
+                        "PAGE_PARAM",
+                        value="page" if pagination_type == "PAGE" else "offset",
+                        key=f"new_page_param_{fv}",
+                        help="Query param name the API expects"
+                    )
+                with pg_c2:
+                    page_size = st.number_input("PAGE_SIZE", value=100, min_value=1, max_value=10000, key=f"new_page_size_{fv}")
+                with pg_c3:
+                    limit_param = st.text_input("LIMIT_PARAM", value="limit", key=f"new_limit_param_{fv}",
+                                                help="Query param for page size (e.g. 'limit', 'per_page')")
                 start_index = st.number_input("START_INDEX", value=1, min_value=0, key=f"new_start_idx_{fv}")
+
+            elif pagination_type == "CURSOR":
+                cu_c1, cu_c2 = st.columns(2)
+                with cu_c1:
+                    cursor_param = st.text_input("CURSOR_PARAM", placeholder="next_token", key=f"new_cursor_param_{fv}",
+                                                 help="Query param name for the cursor value")
+                with cu_c2:
+                    cursor_path = st.text_input("CURSOR_PATH", placeholder="pagination.next_cursor", key=f"new_cursor_path_{fv}",
+                                                help="Dotted JSON path to the next cursor in the response")
+                page_size = st.number_input("PAGE_SIZE", value=100, min_value=1, max_value=10000, key=f"new_page_size_{fv}")
+                limit_param = st.text_input("LIMIT_PARAM", value="limit", key=f"new_limit_param_{fv}")
+                st.caption("Example: Stripe uses `data[-1].id`, Salesforce uses `nextRecordsUrl`.")
+
+            elif pagination_type == "LINK":
+                st.info("LINK header pagination is automatic — follows `rel=\"next\"` URL from the HTTP Link header. No extra config needed.")
+                page_size = st.number_input("PAGE_SIZE (hint only)", value=100, min_value=1, key=f"new_page_size_{fv}")
+
+            with st.expander("Advanced: Pagination Termination Hints", expanded=False):
+                pm_c1, pm_c2 = st.columns(2)
+                with pm_c1:
+                    has_more_path = st.text_input("HAS_MORE_PATH", placeholder="pagination.has_more", key=f"new_has_more_{fv}",
+                                                  help="Dotted path to a boolean signaling more pages exist")
+                with pm_c2:
+                    total_pages_path = st.text_input("TOTAL_PAGES_PATH", placeholder="pagination.total_pages", key=f"new_total_pg_{fv}",
+                                                     help="Dotted path to total page count")
+                max_pages = st.number_input("MAX_PAGES (safety ceiling)", value=10000, min_value=1, key=f"new_max_pages_{fv}",
+                                            help="Hard stop to prevent infinite loops.")
+
+            st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+            section_label("RECORDS PATH")
+            records_path = st.text_input("RECORDS_PATH", value="data", key=f"new_records_path_{fv}",
+                                         help="Dotted path inside the response JSON where the array of records lives (e.g. 'data', 'results', 'items', 'value').")
+            common_paths = {"data": "Standard (Stripe, Tiger)", "results": "Django/FastAPI", "items": "Azure",
+                           "value": "Microsoft Graph", "records": "Salesforce", "content": "Spring Boot"}
+            if records_path in common_paths:
+                st.caption(f"✓ Known pattern: {common_paths[records_path]}")
+
+            st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+            section_label("STATIC FILTERS")
+            filter_mode = st.radio("Filter mode", ["None", "Simple key-value", "JSON (advanced)"],
+                                   horizontal=True, key=f"new_filter_mode_{fv}")
+            filter_params_json = None
+            if filter_mode == "Simple key-value":
+                num_filters = st.number_input("Number of filters", min_value=1, max_value=10, value=1, key=f"new_filter_count_{fv}")
+                filter_dict = {}
+                for fi in range(int(num_filters)):
+                    fk_col, fv_col = st.columns(2)
+                    with fk_col:
+                        fk = st.text_input(f"Key {fi+1}", key=f"new_fk_{fi}_{fv}", placeholder="status")
+                    with fv_col:
+                        fval = st.text_input(f"Value {fi+1}", key=f"new_fv_{fi}_{fv}", placeholder="active")
+                    if fk and fval:
+                        filter_dict[fk] = fval
+                if filter_dict:
+                    filter_params_json = json.dumps(filter_dict)
+                    st.caption(f"Will append: `{'&'.join(f'{k}={v}' for k, v in filter_dict.items())}`")
+            elif filter_mode == "JSON (advanced)":
+                filter_json_raw = st.text_area("FILTER_PARAMS JSON",
+                    placeholder='{\n  "status": "active",\n  "category": ["electronics", "books"]\n}',
+                    height=100, key=f"new_filter_json_{fv}")
+                if filter_json_raw:
+                    try:
+                        parsed = json.loads(filter_json_raw)
+                        filter_params_json = json.dumps(parsed)
+                        st.caption(f"✓ Valid JSON — {len(parsed)} filter(s)")
+                    except Exception as e:
+                        st.error(f"Invalid JSON: {str(e)}")
+                        filter_params_json = None
 
             st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
             section_label("INCREMENTAL SYNC")
@@ -494,6 +645,12 @@ def render() -> None:
                     f"ENDPOINT_URL host is not covered by any network rule ({url_match_reason}). "
                     f"Add a rule in **Manage Secrets & EAI**, or tick the 'Acknowledge gap' checkbox to override."
                 )
+            elif pagination_type == "CURSOR" and not cursor_param:
+                st.error("CURSOR pagination requires CURSOR_PARAM to be configured.")
+            elif pagination_type == "CURSOR" and not cursor_path:
+                st.error("CURSOR pagination requires CURSOR_PATH to be configured.")
+            elif http_method == "POST" and request_body_raw and not _is_valid_json(request_body_raw):
+                st.error("REQUEST_BODY_JSON is not valid JSON. Fix or clear it.")
             else:
                 try:
                     exec_sql(
@@ -501,8 +658,12 @@ def render() -> None:
                         "(API_NAME, ENDPOINT_URL, HTTP_METHOD, AUTH_TYPE, API_KEY_HEADER, "
                         "SECRET_NAME, TOKEN_URL, LANDING_TABLE, PAGINATION_TYPE, PAGE_PARAM, "
                         "START_INDEX, MAX_RETRIES, RETRY_DELAY_SEC, TIMEOUT_SEC, EXTRA_HEADERS_JSON, "
-                        "INCREMENTAL_FLAG, WATERMARK_PARAM, WATERMARK_FIELD, LAST_SYNC_VALUE) "
-                        "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",
+                        "INCREMENTAL_FLAG, WATERMARK_PARAM, WATERMARK_FIELD, LAST_SYNC_VALUE, "
+                        "PAGE_SIZE, LIMIT_PARAM, CURSOR_PARAM, CURSOR_PATH, "
+                        "HAS_MORE_PATH, TOTAL_PAGES_PATH, MAX_PAGES, RECORDS_PATH, "
+                        "REQUEST_BODY_JSON, FILTER_PARAMS) "
+                        "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                        "       ?, ?, ?, ?, ?, ?, ?, ?, ?, TRY_PARSE_JSON(?)",
                         params=[
                             api_name, endpoint_url, http_method, auth_type,
                             api_key_header or None, secret_name or None,
@@ -515,6 +676,16 @@ def render() -> None:
                             (watermark_param or None) if incremental_flag else None,
                             (watermark_field or None) if incremental_flag else None,
                             (last_sync_value or None) if incremental_flag else None,
+                            page_size,
+                            limit_param or "limit",
+                            cursor_param or None,
+                            cursor_path or None,
+                            has_more_path or None,
+                            total_pages_path or None,
+                            max_pages,
+                            records_path or "data",
+                            request_body_raw or None,
+                            filter_params_json or None,
                         ]
                     )
                     rebuild_msg = rebuild_ingestor()
@@ -522,7 +693,6 @@ def render() -> None:
 
                     st.session_state.form_version += 1
                     st.session_state["expand_new_endpoint"] = False
-                    time.sleep(1)
                     st.rerun()
 
                 except Exception as e:
@@ -575,8 +745,7 @@ def render() -> None:
                         f"UPDATE {META}.INGESTION_CONFIGS SET MAX_RETRIES = ?, RETRY_DELAY_SEC = ?, TIMEOUT_SEC = ? WHERE API_NAME = ?",
                         params=[new_retries, new_delay, new_timeout, selected_api]
                     )
-                    st.success(f"Successfully updated resilience parameters for {selected_api}")
-                    time.sleep(1)
+                    st.toast(f"Updated resilience parameters for '{selected_api}'", icon="✅")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Update failed: {str(e)}")
@@ -631,7 +800,6 @@ def render() -> None:
                             )
                             display_val = new_val if new_val else "(NULL — full reload on next run)"
                             st.toast(f"Watermark updated for '{selected_api}': {display_val}", icon="🎯")
-                            time.sleep(1)
                             st.rerun()
                         except Exception as e:
                             st.error(f"Update failed: {str(e)}")
@@ -643,7 +811,6 @@ def render() -> None:
                                 params=[selected_api]
                             )
                             st.toast(f"Cleared watermark for '{selected_api}'. Next run will fetch all data.", icon="🔄")
-                            time.sleep(1)
                             st.rerun()
                         except Exception as e:
                             st.error(f"Clear failed: {str(e)}")
@@ -703,8 +870,7 @@ def render() -> None:
                         params=[selected_api]
                     )
                     rebuild_msg = rebuild_ingestor()
-                    st.success(f"{action_text} successful — {rebuild_msg}")
-                    time.sleep(1.5)
+                    st.toast(f"{action_text} — {rebuild_msg}", icon="✅")
                     st.rerun()
                 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -731,7 +897,6 @@ def render() -> None:
                         )
                         rebuild_msg = rebuild_ingestor()
                         st.toast(f"Deleted '{selected_api}' — {rebuild_msg}", icon="🗑")
-                        time.sleep(1.0)
                         st.rerun()
                     st.markdown('</div>', unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)

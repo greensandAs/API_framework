@@ -104,16 +104,17 @@ def render() -> None:
                 COUNT(DISTINCT DATE_TRUNC('{bucket_unit}', INSERT_DATETIME_UTC)) AS ACTIVE_BUCKETS
             FROM {META}.INGESTION_RESPONSE_LOG
             WHERE {where_sql}
+              AND (API_URL IS NULL OR API_URL != '__PROGRESS__')
             """,
             params=params if params else None
         ).iloc[0]
-        total = int(kpi["TOTAL_CALLS"] or 0)
-        ok = int(kpi["OK_CALLS"] or 0)
-        fails = int(kpi["FAIL_CALLS"] or 0)
-        avg_rt = float(kpi["AVG_RT"] or 0)
-        max_rt = float(kpi["MAX_RT"] or 0)
-        active_apis = int(kpi["ACTIVE_APIS"] or 0)
-        apis_err = int(kpi["APIS_WITH_ERRORS"] or 0)
+        total = int(kpi["TOTAL_CALLS"]) if not pd.isna(kpi["TOTAL_CALLS"]) else 0
+        ok = int(kpi["OK_CALLS"]) if not pd.isna(kpi["OK_CALLS"]) else 0
+        fails = int(kpi["FAIL_CALLS"]) if not pd.isna(kpi["FAIL_CALLS"]) else 0
+        avg_rt = float(kpi["AVG_RT"]) if not pd.isna(kpi["AVG_RT"]) else 0.0
+        max_rt = float(kpi["MAX_RT"]) if not pd.isna(kpi["MAX_RT"]) else 0.0
+        active_apis = int(kpi["ACTIVE_APIS"]) if not pd.isna(kpi["ACTIVE_APIS"]) else 0
+        apis_err = int(kpi["APIS_WITH_ERRORS"]) if not pd.isna(kpi["APIS_WITH_ERRORS"]) else 0
         active_buckets = int(kpi["ACTIVE_BUCKETS"] or 1)
         sr = (ok / max(total, 1)) * 100
     except Exception as _e:
@@ -247,8 +248,8 @@ def render() -> None:
 
     st.markdown("<div style='height:0.8rem'></div>", unsafe_allow_html=True)
 
-    tab_feed, tab_health, tab_retries, tab_errors, tab_intel = st.tabs([
-        "📡  Activity Feed", "🏥  Per-API Health", "🔁  Retry Analysis", "🚨  Incidents", "🧠  Error Intelligence",
+    tab_feed, tab_health, tab_runs, tab_retries, tab_errors, tab_intel = st.tabs([
+        "📡  Activity Feed", "🏥  Per-API Health", "📊  Run Summary", "🔁  Retry Analysis", "🚨  Incidents", "🧠  Error Intelligence",
     ])
 
     with tab_feed:
@@ -260,6 +261,7 @@ def render() -> None:
                        INSERT_DATETIME_UTC, ERROR_MESSAGE_TEXT
                 FROM {META}.INGESTION_RESPONSE_LOG
                 WHERE {where_sql}
+                  AND (API_URL IS NULL OR API_URL != '__PROGRESS__')
                 ORDER BY INSERT_DATETIME_UTC DESC
                 LIMIT {int(log_limit)}
                 """,
@@ -302,6 +304,7 @@ def render() -> None:
                        MAX(INSERT_DATETIME_UTC)                           AS LAST_RUN
                 FROM {META}.INGESTION_RESPONSE_LOG
                 WHERE {where_sql}
+                  AND (API_URL IS NULL OR API_URL != '__PROGRESS__')
                 GROUP BY API_NAME
                 ORDER BY (OK / NULLIF(CALLS, 0)) ASC NULLS FIRST
                 """,
@@ -310,6 +313,14 @@ def render() -> None:
         except Exception as _e:
             health_df = pd.DataFrame()
             st.caption(f"Health unavailable: {_e}")
+
+        latest_runs = {}
+        try:
+            lr_df = run_query(f"SELECT * FROM {META}.V_LATEST_RUNS")
+            for _, lr in lr_df.iterrows():
+                latest_runs[lr["API_NAME"]] = lr.to_dict()
+        except Exception:
+            pass
 
         if health_df.empty:
             empty_state("🏥", "No data", "No log activity in this window.")
@@ -322,14 +333,30 @@ def render() -> None:
                 bar_color = "#29B5E8" if sr_v >= 99 else ("#f59e0b" if sr_v >= 90 else "#ef4444")
                 last_run_v = h["LAST_RUN"]
                 last_run_s = pd.to_datetime(last_run_v).strftime("%Y-%m-%d %H:%M") if pd.notna(last_run_v) else "—"
+
+                lr_info = latest_runs.get(h["API_NAME"], {})
+                lr_records = lr_info.get("RECORDS_INGESTED")
+                lr_status = lr_info.get("STATUS", "")
+                lr_duration = lr_info.get("DURATION_SEC")
+
+                meta_parts = [f"last run: {last_run_s}"]
+                if lr_records is not None and not pd.isna(lr_records):
+                    meta_parts.append(f"last ingested: {int(lr_records):,} records")
+                if lr_duration is not None and not pd.isna(lr_duration):
+                    meta_parts.append(f"duration: {int(lr_duration)}s")
+
+                badges = [
+                    {"text": f"✓ {int(h['OK']):,}", "cls": "accent"},
+                    {"text": f"✗ {int(h['FAILS']):,}", "cls": "danger" if h["FAILS"] > 0 else ""},
+                ]
+                if lr_status and lr_status != "SUCCESS":
+                    badges.append({"text": f"LAST: {lr_status}", "cls": "warn"})
+
                 cfg_card(
                     h["API_NAME"],
                     f"{sr_v}% success · {int(h['CALLS']):,} calls · avg {h['AVG_RT']}s · max {h['MAX_RT']}s",
-                    badges=[
-                        {"text": f"✓ {int(h['OK']):,}", "cls": "accent"},
-                        {"text": f"✗ {int(h['FAILS']):,}", "cls": "danger" if h["FAILS"] > 0 else ""},
-                    ],
-                    meta=f"last run: {last_run_s}",
+                    badges=badges,
+                    meta=" · ".join(meta_parts),
                     status=h_status,
                 )
                 st.markdown(
@@ -339,22 +366,88 @@ def render() -> None:
                     unsafe_allow_html=True
                 )
 
+    with tab_runs:
+        st.caption("One row per ingestion run — aggregated from INGESTION_RUN_SUMMARY.")
+        try:
+            runs_df = run_query(
+                f"""
+                SELECT API_NAME, STATUS, RUN_START_UTC, RUN_END_UTC,
+                       TIMESTAMPDIFF(SECOND, RUN_START_UTC, RUN_END_UTC) AS DURATION_SEC,
+                       PAGES_PROCESSED, RECORDS_INGESTED, RECORDS_SKIPPED,
+                       WATERMARK_FROM, WATERMARK_TO, FINAL_PAGE_TYPE, ERROR_MESSAGE
+                FROM {META}.INGESTION_RUN_SUMMARY
+                WHERE RUN_START_UTC >= DATEADD('{_unit}', -{_amt}, CURRENT_TIMESTAMP())
+                ORDER BY RUN_START_UTC DESC
+                LIMIT 200
+                """
+            )
+        except Exception as _e:
+            runs_df = pd.DataFrame()
+            st.caption(f"Run summary unavailable: {_e}")
+
+        if runs_df.empty:
+            empty_state("📊", "No run summaries yet", "Runs will appear here after the enhanced procedure executes.")
+        else:
+            success_runs = int((runs_df["STATUS"] == "SUCCESS").sum())
+            error_runs = int((runs_df["STATUS"] == "ERROR").sum())
+            warning_runs = int((runs_df["STATUS"] == "WARNING").sum())
+            total_records = int(runs_df["RECORDS_INGESTED"].fillna(0).sum())
+
+            rs1, rs2, rs3, rs4 = st.columns(4)
+            with rs1:
+                dd_tile("TOTAL RUNS", len(runs_df), f"last {time_range}", "flat")
+            with rs2:
+                dd_tile("SUCCESS", success_runs, f"{round(success_runs/max(len(runs_df),1)*100)}%",
+                        "up" if success_runs == len(runs_df) else "flat", glow="ok" if error_runs == 0 else None)
+            with rs3:
+                dd_tile("ERRORS", error_runs, "need attention" if error_runs else "clean",
+                        "down" if error_runs else "flat", glow="err" if error_runs else None)
+            with rs4:
+                dd_tile("RECORDS INGESTED", f"{total_records:,}", f"across {len(runs_df)} runs", "flat")
+
+            st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
+
+            run_tab_detail, run_tab_errors = st.tabs(["📋 All Runs", "🚨 Failed Runs"])
+            with run_tab_detail:
+                styled_dataframe(runs_df.drop(columns=["ERROR_MESSAGE"], errors="ignore"))
+            with run_tab_errors:
+                failed_runs = runs_df[runs_df["STATUS"].isin(["ERROR", "WARNING"])]
+                if failed_runs.empty:
+                    empty_state("✅", "No failed runs", f"All runs succeeded in the last {time_range}.")
+                else:
+                    for _, fr in failed_runs.iterrows():
+                        err_msg = str(fr.get("ERROR_MESSAGE") or "Unknown")
+                        ts = str(fr.get("RUN_START_UTC") or "")[:16]
+                        pages = fr.get("PAGES_PROCESSED") or 0
+                        cfg_card(
+                            name=f"{fr['API_NAME']} — {fr['STATUS']}",
+                            endpoint=err_msg[:200],
+                            badges=[
+                                {"text": fr["STATUS"], "cls": "danger" if fr["STATUS"] == "ERROR" else "warn"},
+                                {"text": f"{pages} pages", "cls": ""},
+                            ],
+                            meta=f"started: {ts} · type: {fr.get('FINAL_PAGE_TYPE', '—')}",
+                            status="error" if fr["STATUS"] == "ERROR" else "warning"
+                        )
+
     with tab_retries:
         st.caption("Pages where the framework had to retry — including transient errors that eventually succeeded.")
         try:
             retry_summary = run_query(
                 f"""
                 WITH base AS (
-                    SELECT API_NAME, PAGE_NUMBER, ATTEMPT_NUMBER, STATUS_CODE,
+                    SELECT COALESCE(RUN_ID, API_NAME || '_' || DATE_TRUNC('HOUR', INSERT_DATETIME_UTC)::STRING) AS RUN_ID,
+                           API_NAME, PAGE_NUMBER, ATTEMPT_NUMBER, STATUS_CODE,
                            ERROR_MESSAGE_TEXT, RESPONSE_TIME_SECONDS, IS_FINAL_ATTEMPT,
                            INSERT_DATETIME_UTC, API_URL
                     FROM {META}.INGESTION_RESPONSE_LOG
                     WHERE {where_sql}
                       AND PAGE_NUMBER IS NOT NULL
                       AND ATTEMPT_NUMBER IS NOT NULL
+                      AND (API_URL IS NULL OR API_URL != '__PROGRESS__')
                 ),
                 grouped AS (
-                    SELECT API_NAME, PAGE_NUMBER,
+                    SELECT RUN_ID, API_NAME, PAGE_NUMBER,
                            MIN(INSERT_DATETIME_UTC) AS RUN_STARTED_UTC,
                            MAX(INSERT_DATETIME_UTC) AS RUN_ENDED_UTC,
                            COUNT(*) AS ATTEMPTS,
@@ -363,10 +456,10 @@ def render() -> None:
                                     WHEN IS_FINAL_ATTEMPT THEN 'Exhausted'
                                     ELSE NULL END) AS OUTCOME
                     FROM base
-                    GROUP BY API_NAME, PAGE_NUMBER
+                    GROUP BY RUN_ID, API_NAME, PAGE_NUMBER
                     HAVING COUNT(*) > 1
                 )
-                SELECT API_NAME, PAGE_NUMBER, ATTEMPTS, FINAL_STATUS, OUTCOME,
+                SELECT RUN_ID, API_NAME, PAGE_NUMBER, ATTEMPTS, FINAL_STATUS, OUTCOME,
                        RUN_STARTED_UTC, RUN_ENDED_UTC
                 FROM grouped
                 ORDER BY RUN_STARTED_UTC DESC
@@ -418,6 +511,7 @@ def render() -> None:
             styled_dataframe(retry_summary)
 
             retry_summary["LABEL"] = (
+                retry_summary["RUN_ID"].astype(str).str[:8] + " · " +
                 retry_summary["API_NAME"].astype(str) + " — page " +
                 retry_summary["PAGE_NUMBER"].astype(str) + " (" +
                 retry_summary["ATTEMPTS"].astype(str) + " attempts, " +
@@ -432,14 +526,17 @@ def render() -> None:
                 sel_row = retry_summary[retry_summary["LABEL"] == pick].iloc[0]
                 sel_api = sel_row["API_NAME"]
                 sel_page = int(sel_row["PAGE_NUMBER"])
+                sel_run_id = sel_row["RUN_ID"]
                 try:
+                    run_filter = "AND RUN_ID = ?" if sel_run_id else ""
+                    run_params = [sel_api, sel_page] + ([sel_run_id] if sel_run_id else [])
                     attempts_df = run_query(
-                        f"SELECT ATTEMPT_NUMBER, IS_FINAL_ATTEMPT, STATUS_CODE, "
+                        f"SELECT RUN_ID, ATTEMPT_NUMBER, IS_FINAL_ATTEMPT, STATUS_CODE, "
                         f"RESPONSE_TIME_SECONDS, ERROR_MESSAGE_TEXT, INSERT_DATETIME_UTC, API_URL "
                         f"FROM {META}.INGESTION_RESPONSE_LOG "
-                        f"WHERE API_NAME = ? AND PAGE_NUMBER = ? "
+                        f"WHERE API_NAME = ? AND PAGE_NUMBER = ? {run_filter} "
                         f"ORDER BY ATTEMPT_NUMBER",
-                        params=[sel_api, sel_page]
+                        params=run_params
                     )
                     if attempts_df.empty:
                         st.info("No attempt rows found.")
@@ -461,6 +558,7 @@ def render() -> None:
                 FROM {META}.INGESTION_RESPONSE_LOG
                 WHERE {where_sql}
                   AND (STATUS_CODE != 200 OR STATUS_CODE IS NULL)
+                  AND (API_URL IS NULL OR API_URL != '__PROGRESS__')
                 ORDER BY INSERT_DATETIME_UTC DESC
                 LIMIT 200
                 """,
@@ -499,21 +597,35 @@ def render() -> None:
                 f"""
                 SELECT
                     COALESCE(STATUS_CODE::STRING, 'NULL') AS CODE,
-                    COUNT(*)                              AS OCCURRENCES,
-                    COUNT(DISTINCT API_NAME)              AS APIS_AFFECTED,
-                    MAX(INSERT_DATETIME_UTC)              AS LAST_SEEN,
-                    MIN(INSERT_DATETIME_UTC)              AS FIRST_SEEN
-                FROM {META}.INGESTION_RESPONSE_LOG
-                WHERE {where_sql}
-                  AND (STATUS_CODE != 200 OR STATUS_CODE IS NULL)
+                    SUM(OCCURRENCES)                       AS OCCURRENCES,
+                    COUNT(DISTINCT API_NAME)               AS APIS_AFFECTED,
+                    MAX(LAST_SEEN)                         AS LAST_SEEN
+                FROM {META}.V_ERROR_SUMMARY_7D
                 GROUP BY 1
                 ORDER BY OCCURRENCES DESC
-                """,
-                params=params if params else None
+                """
             )
-        except Exception as _e:
-            error_freq_df = pd.DataFrame()
-            st.caption(f"Error intelligence unavailable: {_e}")
+        except Exception:
+            try:
+                error_freq_df = run_query(
+                    f"""
+                    SELECT
+                        COALESCE(STATUS_CODE::STRING, 'NULL') AS CODE,
+                        COUNT(*)                              AS OCCURRENCES,
+                        COUNT(DISTINCT API_NAME)              AS APIS_AFFECTED,
+                        MAX(INSERT_DATETIME_UTC)              AS LAST_SEEN
+                    FROM {META}.INGESTION_RESPONSE_LOG
+                    WHERE {where_sql}
+                      AND (STATUS_CODE != 200 OR STATUS_CODE IS NULL)
+                      AND (API_URL IS NULL OR API_URL != '__PROGRESS__')
+                    GROUP BY 1
+                    ORDER BY OCCURRENCES DESC
+                    """,
+                    params=params if params else None
+                )
+            except Exception as _e:
+                error_freq_df = pd.DataFrame()
+                st.caption(f"Error intelligence unavailable: {_e}")
 
         try:
             error_api_df = run_query(
@@ -521,17 +633,34 @@ def render() -> None:
                 SELECT
                     COALESCE(STATUS_CODE::STRING, 'NULL') AS CODE,
                     API_NAME,
-                    COUNT(*)                              AS OCCURRENCES,
-                    MAX(INSERT_DATETIME_UTC)              AS LAST_SEEN,
-                    ANY_VALUE(ERROR_MESSAGE_TEXT)         AS SAMPLE_MESSAGE
-                FROM {META}.INGESTION_RESPONSE_LOG
-                WHERE {where_sql}
-                  AND (STATUS_CODE != 200 OR STATUS_CODE IS NULL)
-                GROUP BY 1, 2
+                    OCCURRENCES,
+                    LAST_SEEN,
+                    SAMPLE_ERROR AS SAMPLE_MESSAGE
+                FROM {META}.V_ERROR_SUMMARY_7D
                 ORDER BY 1, OCCURRENCES DESC
-                """,
-                params=params if params else None
+                """
             )
+        except Exception:
+            try:
+                error_api_df = run_query(
+                    f"""
+                    SELECT
+                        COALESCE(STATUS_CODE::STRING, 'NULL') AS CODE,
+                        API_NAME,
+                        COUNT(*)                              AS OCCURRENCES,
+                        MAX(INSERT_DATETIME_UTC)              AS LAST_SEEN,
+                        ANY_VALUE(ERROR_MESSAGE_TEXT)         AS SAMPLE_MESSAGE
+                    FROM {META}.INGESTION_RESPONSE_LOG
+                    WHERE {where_sql}
+                      AND (STATUS_CODE != 200 OR STATUS_CODE IS NULL)
+                      AND (API_URL IS NULL OR API_URL != '__PROGRESS__')
+                    GROUP BY 1, 2
+                    ORDER BY 1, OCCURRENCES DESC
+                    """,
+                    params=params if params else None
+                )
+            except Exception:
+                error_api_df = pd.DataFrame()
         except Exception:
             error_api_df = pd.DataFrame()
 
