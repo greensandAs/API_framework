@@ -394,9 +394,10 @@ def main(session, api_target):
     staging_table = f"API_DATA_PIPELINE.RAW_LANDING._STG_{api_target}_{int(run_start)}"
     try:
         session.sql(
-            f"CREATE OR REPLACE TABLE {staging_table} ("
+            f"CREATE OR REPLACE TRANSIENT TABLE {staging_table} ("
             "API_ID NUMBER, API_NAME VARCHAR, STATUS_CODE NUMBER, "
-            "PAYLOAD VARIANT, PAYLOAD_HASH VARCHAR, URL_ATTEMPTED VARCHAR)"
+            "PAYLOAD VARIANT, PAYLOAD_HASH VARCHAR, URL_ATTEMPTED VARCHAR) "
+            "DATA_RETENTION_TIME_IN_DAYS = 0"
         ).collect()
     except Exception as e:
         return f"Error creating staging table: {str(e)}"
@@ -420,7 +421,13 @@ def main(session, api_target):
 
             if incremental_flag and watermark_param and last_sync_value:
                 if pagination_type != "CURSOR" or is_first_cursor_page:
-                    url = f"{url}{connector}{watermark_param}={_urlparse.quote(str(last_sync_value))}"
+                    try:
+                        from datetime import datetime as _dt, timedelta as _td
+                        _wm_dt = _dt.fromisoformat(str(last_sync_value).replace("Z", "+00:00"))
+                        _overlap_wm = (_wm_dt - _td(seconds=7200)).isoformat().replace("+00:00", "Z")
+                    except Exception:
+                        _overlap_wm = last_sync_value
+                    url = f"{url}{connector}{watermark_param}={_urlparse.quote(str(_overlap_wm))}"
                     connector = "&"
 
         if pagination_type == "PAGE":
@@ -472,6 +479,15 @@ def main(session, api_target):
                 wm_val = extract_field(rec, watermark_field)
                 if wm_val is not None:
                     new_watermark = compare_watermarks(new_watermark, wm_val)
+            if new_watermark is not None and str(new_watermark) != str(last_sync_value or ""):
+                try:
+                    session.sql(
+                        "UPDATE API_DATA_PIPELINE.METADATA.INGESTION_CONFIGS SET LAST_SYNC_VALUE = ? WHERE API_NAME = ?",
+                        params=[str(new_watermark), api_target]
+                    ).collect()
+                    last_sync_value = str(new_watermark)
+                except Exception:
+                    pass
 
         if data_to_split:
             total_chunks_page = max(1, (len(data_to_split) + CHUNK_SIZE - 1) // CHUNK_SIZE)
@@ -592,25 +608,52 @@ def main(session, api_target):
     except Exception:
         pass
 
-    watermark_persisted = False
-    if incremental_flag and new_watermark is not None and str(new_watermark) != str(last_sync_value or ""):
-        try:
-            session.sql("UPDATE API_DATA_PIPELINE.METADATA.INGESTION_CONFIGS SET LAST_SYNC_VALUE = ? WHERE API_NAME = ?",
-                        params=[str(new_watermark), api_target]).collect()
-            watermark_persisted = True
-        except Exception:
-            pass
+    watermark_persisted = bool(
+        incremental_flag and new_watermark is not None and str(new_watermark) != str(_cfg.get("LAST_SYNC_VALUE") or "")
+    )
 
     log_run_summary(session, run_id, api_target, api_id, run_start, pages_processed, total_chunks_all,
                     records_ingested, records_skipped, "SUCCESS",
-                    last_sync_value or None, safe_str(new_watermark) if watermark_persisted else None,
+                    _cfg.get("LAST_SYNC_VALUE") or None, safe_str(new_watermark) if watermark_persisted else None,
                     pagination_type)
 
     wm_msg = ""
     if incremental_flag:
         wm_msg = f" | Watermark: {last_sync_value or '(none)'} -> {new_watermark or '(unchanged)'}"
     dup_msg = f" | {records_skipped:,} dup(s) skipped" if records_skipped else ""
-    return f"Success: '{api_target}' — {pages_processed} page(s) · {records_ingested:,} records{dup_msg}{wm_msg}"
+
+    export_msg = ""
+    if bool(_cfg.get("EXPORT_ENABLED", False)):
+        try:
+            exp_cnt = session.sql(
+                "SELECT COUNT(*) AS C FROM API_DATA_PIPELINE.METADATA.EXPORT_CONFIGS "
+                "WHERE API_NAME = ? AND ACTIVE_FLAG = TRUE",
+                params=[api_target]
+            ).collect()
+            has_export_config = bool(exp_cnt and int(exp_cnt[0][0]) > 0)
+        except Exception:
+            has_export_config = False
+
+        if has_export_config:
+            try:
+                export_result = session.sql(
+                    "CALL API_DATA_PIPELINE.METADATA.USP_EXPORT_TO_STAGE(?, ?, NULL)",
+                    params=[api_target, run_id]
+                ).collect()
+                export_msg = export_result[0][0] if export_result else "no result"
+                if "FAILED" in str(export_msg):
+                    log_attempt(session, run_id, api_target, api_id, '__EXPORT_ERROR__', None, None,
+                                export_msg, 0, None, True, None)
+            except Exception as exp_err:
+                export_msg = f"Export failed: {str(exp_err)}"
+                log_attempt(session, run_id, api_target, api_id, '__EXPORT_ERROR__', None, None,
+                            export_msg, 0, None, True, None)
+        else:
+            export_msg = "pending — no export destination configured yet"
+            log_attempt(session, run_id, api_target, api_id, '__EXPORT_PENDING__', None, None,
+                        export_msg, 0, None, False, None)
+    export_suffix = f" | Export: {export_msg}" if export_msg else ""
+    return f"Success: '{api_target}' — {pages_processed} page(s) · {records_ingested:,} records{dup_msg}{wm_msg}{export_suffix}"
 ''').strip()
 
     ddl = f"""CREATE OR REPLACE PROCEDURE API_DATA_PIPELINE.METADATA.USP_UNIVERSAL_INGESTOR("API_TARGET" VARCHAR)

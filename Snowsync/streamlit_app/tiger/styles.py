@@ -30,7 +30,7 @@ _TIGER_CSS = """
         color-scheme: dark;
     }
 
-    .block-container { padding-top: 0.6rem; padding-bottom: 1rem; max-width: 100%; font-family: var(--font-body); }
+    .block-container { padding-top: 0.5rem; padding-bottom: 1rem; max-width: 100%; font-family: var(--font-body); }
     html, body, [class*="css"] { font-family: var(--font-body); }
     .main .block-container { background: var(--bg-deep); }
 
@@ -351,11 +351,12 @@ _TIGER_CSS = """
     .chip.muted  { color: var(--text-muted); }
 
     .topbar {
-        position: sticky; top: 0; z-index: 100;
+        position: relative;
+        z-index: 50;
         background: linear-gradient(180deg, rgba(10,10,10,0.95) 0%, rgba(10,10,10,0.85) 100%);
         backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
         border-bottom: 1px solid var(--border-subtle);
-        padding: 12px 6px; margin: -8px 0 18px;
+        padding: 12px 16px; margin: 0 0 18px;
         display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;
     }
     .topbar-brand { display: flex; align-items: center; gap: 12px; }

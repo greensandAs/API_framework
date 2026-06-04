@@ -104,7 +104,7 @@ def render() -> None:
                 COUNT(DISTINCT DATE_TRUNC('{bucket_unit}', INSERT_DATETIME_UTC)) AS ACTIVE_BUCKETS
             FROM {META}.INGESTION_RESPONSE_LOG
             WHERE {where_sql}
-              AND (API_URL IS NULL OR API_URL != '__PROGRESS__')
+              AND (API_URL IS NULL OR API_URL NOT IN ('__PROGRESS__', '__EXPORT_ERROR__', '__EXPORT_PENDING__'))
             """,
             params=params if params else None
         ).iloc[0]
@@ -261,7 +261,7 @@ def render() -> None:
                        INSERT_DATETIME_UTC, ERROR_MESSAGE_TEXT
                 FROM {META}.INGESTION_RESPONSE_LOG
                 WHERE {where_sql}
-                  AND (API_URL IS NULL OR API_URL != '__PROGRESS__')
+                  AND (API_URL IS NULL OR API_URL NOT IN ('__PROGRESS__', '__EXPORT_ERROR__', '__EXPORT_PENDING__'))
                 ORDER BY INSERT_DATETIME_UTC DESC
                 LIMIT {int(log_limit)}
                 """,
@@ -304,7 +304,7 @@ def render() -> None:
                        MAX(INSERT_DATETIME_UTC)                           AS LAST_RUN
                 FROM {META}.INGESTION_RESPONSE_LOG
                 WHERE {where_sql}
-                  AND (API_URL IS NULL OR API_URL != '__PROGRESS__')
+                  AND (API_URL IS NULL OR API_URL NOT IN ('__PROGRESS__', '__EXPORT_ERROR__', '__EXPORT_PENDING__'))
                 GROUP BY API_NAME
                 ORDER BY (OK / NULLIF(CALLS, 0)) ASC NULLS FIRST
                 """,
@@ -430,6 +430,36 @@ def render() -> None:
                             status="error" if fr["STATUS"] == "ERROR" else "warning"
                         )
 
+        st.markdown("<div style='height:0.8rem'></div>", unsafe_allow_html=True)
+        try:
+            export_issues = run_query(
+                f"""
+                SELECT API_NAME, ERROR_MESSAGE_TEXT, INSERT_DATETIME_UTC, RUN_ID
+                FROM {META}.INGESTION_RESPONSE_LOG
+                WHERE {where_sql}
+                  AND API_URL = '__EXPORT_ERROR__'
+                ORDER BY INSERT_DATETIME_UTC DESC
+                LIMIT 50
+                """,
+                params=params if params else None
+            )
+        except Exception:
+            export_issues = pd.DataFrame()
+
+        if not export_issues.empty:
+            with st.expander(f"📤 Export Issues ({len(export_issues)})", expanded=False):
+                st.caption("Export failures — ingestion succeeded but the S3/ADLS export step failed.")
+                for _, ei in export_issues.iterrows():
+                    ts = str(ei.get("INSERT_DATETIME_UTC") or "")[:16]
+                    rid = str(ei.get("RUN_ID") or "")[:8]
+                    st.markdown(
+                        f"<div class='cfg-card error'>"
+                        f"<div class='name' style='font-size:0.82rem;'>{ei.get('API_NAME', '—')}</div>"
+                        f"<div class='endpoint' style='font-size:0.72rem;'>{str(ei.get('ERROR_MESSAGE_TEXT') or '')[:300]}</div>"
+                        f"<div class='meta'>run: {rid} · {ts}</div></div>",
+                        unsafe_allow_html=True
+                    )
+
     with tab_retries:
         st.caption("Pages where the framework had to retry — including transient errors that eventually succeeded.")
         try:
@@ -444,7 +474,7 @@ def render() -> None:
                     WHERE {where_sql}
                       AND PAGE_NUMBER IS NOT NULL
                       AND ATTEMPT_NUMBER IS NOT NULL
-                      AND (API_URL IS NULL OR API_URL != '__PROGRESS__')
+                      AND (API_URL IS NULL OR API_URL NOT IN ('__PROGRESS__', '__EXPORT_ERROR__', '__EXPORT_PENDING__'))
                 ),
                 grouped AS (
                     SELECT RUN_ID, API_NAME, PAGE_NUMBER,
@@ -558,7 +588,7 @@ def render() -> None:
                 FROM {META}.INGESTION_RESPONSE_LOG
                 WHERE {where_sql}
                   AND (STATUS_CODE != 200 OR STATUS_CODE IS NULL)
-                  AND (API_URL IS NULL OR API_URL != '__PROGRESS__')
+                  AND (API_URL IS NULL OR API_URL NOT IN ('__PROGRESS__', '__EXPORT_ERROR__', '__EXPORT_PENDING__'))
                 ORDER BY INSERT_DATETIME_UTC DESC
                 LIMIT 200
                 """,
@@ -617,7 +647,7 @@ def render() -> None:
                     FROM {META}.INGESTION_RESPONSE_LOG
                     WHERE {where_sql}
                       AND (STATUS_CODE != 200 OR STATUS_CODE IS NULL)
-                      AND (API_URL IS NULL OR API_URL != '__PROGRESS__')
+                      AND (API_URL IS NULL OR API_URL NOT IN ('__PROGRESS__', '__EXPORT_ERROR__', '__EXPORT_PENDING__'))
                     GROUP BY 1
                     ORDER BY OCCURRENCES DESC
                     """,
@@ -653,7 +683,7 @@ def render() -> None:
                     FROM {META}.INGESTION_RESPONSE_LOG
                     WHERE {where_sql}
                       AND (STATUS_CODE != 200 OR STATUS_CODE IS NULL)
-                      AND (API_URL IS NULL OR API_URL != '__PROGRESS__')
+                      AND (API_URL IS NULL OR API_URL NOT IN ('__PROGRESS__', '__EXPORT_ERROR__', '__EXPORT_PENDING__'))
                     GROUP BY 1, 2
                     ORDER BY 1, OCCURRENCES DESC
                     """,

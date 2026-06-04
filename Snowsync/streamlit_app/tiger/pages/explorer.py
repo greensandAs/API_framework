@@ -7,13 +7,13 @@ import streamlit as st
 import pandas as pd
 
 from tiger.helpers import (
-    section_label, empty_state, dd_tile, styled_dataframe,
+    section_label, empty_state, dd_tile, styled_dataframe, cfg_card,
 )
 from tiger.knowledge import (
     _ds_infer_type, _ds_walk, _ds_collect_records, _ds_parse_payload,
 )
 from tiger.db import (
-    DB, RAW,
+    DB, RAW, META,
     is_safe_name, escape_sql_literal,
     run_query, exec_sql,
 )
@@ -31,6 +31,9 @@ def render() -> None:
     if "selected_hash" not in st.session_state:
         st.session_state["selected_hash"] = None
 
+    if "de_table" not in st.session_state:
+        st.session_state["de_table"] = "API_RAW_DATA"
+
     left_ctx, right_work = st.columns([1, 3], gap="large")
 
     with left_ctx:
@@ -46,11 +49,22 @@ def render() -> None:
         if "API_RAW_DATA" not in landing_tables:
             landing_tables.insert(0, "API_RAW_DATA")
 
-        de_table = st.selectbox(
+        current_table = st.session_state["de_table"]
+        table_idx = landing_tables.index(current_table) if current_table in landing_tables else 0
+        picked_table = st.selectbox(
             "Landing Table",
             landing_tables,
+            index=table_idx,
             key="de_table_picker",
         )
+        if picked_table != st.session_state["de_table"]:
+            st.session_state["de_table"] = picked_table
+            st.session_state["de_api"] = "All"
+            st.session_state["browse_page"] = 0
+            st.session_state["selected_hash"] = None
+            st.session_state.pop("ds_schema_df", None)
+            st.rerun()
+        de_table = st.session_state["de_table"]
 
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
         section_label("FILTER BY API")
@@ -111,6 +125,33 @@ def render() -> None:
             """, unsafe_allow_html=True)
 
     with right_work:
+        if de_api != "All":
+            try:
+                exp_status = run_query(
+                    f"SELECT ic.EXPORT_ENABLED, "
+                    f"  (SELECT COUNT(*) FROM {META}.EXPORT_CONFIGS ec "
+                    f"   WHERE ec.API_NAME = ic.API_NAME AND ec.ACTIVE_FLAG = TRUE) AS EXPORT_COUNT "
+                    f"FROM {META}.INGESTION_CONFIGS ic WHERE ic.API_NAME = ?",
+                    params=[de_api]
+                )
+                if not exp_status.empty:
+                    _en = bool(exp_status["EXPORT_ENABLED"].iloc[0])
+                    _cnt = int(exp_status["EXPORT_COUNT"].iloc[0] or 0)
+                    if _en and _cnt == 0:
+                        st.markdown(
+                            "<div style='background:rgba(41,181,232,0.06);border:1px solid rgba(41,181,232,0.25);"
+                            "border-left:4px solid #29B5E8;border-radius:8px;padding:14px 18px;margin-bottom:1rem;'>"
+                            "<div style='font-family:var(--font-display);font-weight:800;color:var(--text-primary);"
+                            "font-size:0.9rem;'>📤 Export enabled — ready to configure</div>"
+                            "<div style='color:var(--text-secondary);font-size:0.8rem;margin-top:6px;'>"
+                            "Run <strong>Schema Discovery</strong>, select your fields in <strong>SQL Builder</strong>, "
+                            "then scroll to <strong>Export to S3 / ADLS</strong> to set up the destination. "
+                            "Field names auto-populate from the actual API response.</div></div>",
+                            unsafe_allow_html=True
+                        )
+            except Exception:
+                pass
+
         tab_browse, tab_schema, tab_builder = st.tabs([
             "🗂  Browse Payloads", "🔬  Schema Discovery", "🔧  SQL Builder",
         ])
@@ -167,36 +208,21 @@ def render() -> None:
                             "Run an ingestion first, then browse payloads here.")
             else:
                 try:
-                    total_q = run_query(
-                        f"SELECT COUNT(*) AS C FROM {RAW}.{de_table} {api_where}",
-                        params=api_params,
-                    )
-                    total_recs = int(total_q["C"].iloc[0])
-                except Exception:
-                    total_recs = len(records_df)
-
-                try:
-                    where_ok = (api_where + (" AND" if api_where else "WHERE")) + " STATUS_CODE = 200"
-                    ok_q = run_query(
-                        f"SELECT COUNT(*) AS C FROM {RAW}.{de_table} {where_ok}",
-                        params=api_params,
-                    )
-                    ok_recs = int(ok_q["C"].iloc[0])
-                except Exception:
-                    ok_recs = 0
-
-                try:
-                    size_q = run_query(
-                        f"SELECT ROUND(AVG(LENGTH(PAYLOAD::STRING))/1024, 1) AS AVG_KB, "
+                    summary_q = run_query(
+                        f"SELECT COUNT(*) AS TOTAL_RECS, "
+                        f"SUM(CASE WHEN STATUS_CODE = 200 THEN 1 ELSE 0 END) AS OK_RECS, "
+                        f"ROUND(AVG(LENGTH(PAYLOAD::STRING))/1024, 1) AS AVG_KB, "
                         f"ROUND(MAX(LENGTH(PAYLOAD::STRING))/1024, 1) AS MAX_KB "
                         f"FROM {RAW}.{de_table} {api_where}",
                         params=api_params,
                     )
-                    avg_kb_raw = size_q["AVG_KB"].iloc[0]
-                    max_kb_raw = size_q["MAX_KB"].iloc[0]
-                    avg_kb = 0.0 if avg_kb_raw is None or pd.isna(avg_kb_raw) else float(avg_kb_raw)
-                    max_kb = 0.0 if max_kb_raw is None or pd.isna(max_kb_raw) else float(max_kb_raw)
+                    total_recs = int(summary_q["TOTAL_RECS"].iloc[0]) if not pd.isna(summary_q["TOTAL_RECS"].iloc[0]) else 0
+                    ok_recs = int(summary_q["OK_RECS"].iloc[0]) if not pd.isna(summary_q["OK_RECS"].iloc[0]) else 0
+                    avg_kb = float(summary_q["AVG_KB"].iloc[0]) if not pd.isna(summary_q["AVG_KB"].iloc[0]) else 0.0
+                    max_kb = float(summary_q["MAX_KB"].iloc[0]) if not pd.isna(summary_q["MAX_KB"].iloc[0]) else 0.0
                 except Exception:
+                    total_recs = len(records_df)
+                    ok_recs = 0
                     avg_kb = max_kb = 0.0
 
                 ok_pct = round(ok_recs / max(total_recs, 1) * 100, 1)
@@ -294,9 +320,20 @@ def render() -> None:
                             )
                             try:
                                 payload_obj = json.loads(payload_str) if payload_str else {}
-                                st.json(payload_obj, expanded=True)
+                                payload_size_kb = len(payload_str) / 1024
+                                if payload_size_kb > 200:
+                                    preview = {
+                                        "_chunk_meta": payload_obj.get("_chunk_meta", {}),
+                                        "data": f"[{len(payload_obj.get('data', []))} records — download for full payload]",
+                                    }
+                                    st.json(preview, expanded=2)
+                                    st.info(f"Full payload: {len(payload_obj.get('data', []))} records ({payload_size_kb:.0f} KB). Use download button.")
+                                elif payload_size_kb > 50:
+                                    st.json(payload_obj, expanded=1)
+                                else:
+                                    st.json(payload_obj, expanded=2)
                             except Exception:
-                                st.code(payload_str, language="json")
+                                st.code(payload_str[:5000] + ("..." if len(payload_str) > 5000 else ""), language="json")
 
                             st.download_button(
                                 "⬇ Download Payload JSON",
@@ -516,6 +553,7 @@ def render() -> None:
                 "ds_schema_df" in st.session_state
                 and not st.session_state["ds_schema_df"].empty
                 and st.session_state.get("ds_schema_api") == de_api
+                and st.session_state.get("ds_schema_table") == de_table
             )
             if not has_schema:
                 empty_state(
@@ -595,7 +633,7 @@ def render() -> None:
                                 pending_selection[path] = st.checkbox(
                                     f"`{path}`  ·  {ftype}  ·  {cov}%",
                                     value=bool(st.session_state[sel_state_key].get(path, True)),
-                                    key=f"field_form_{de_api}_{path}",
+                                    key=f"field_form_{de_table}_{de_api}_{path}",
                                 )
 
                     apply_clicked = st.form_submit_button(
@@ -701,3 +739,90 @@ def render() -> None:
                     st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
                     section_label("PREVIEW · FIRST 10 ROWS")
                     styled_dataframe(st.session_state["view_preview"])
+
+                # ── EXPORT TO S3 / ADLS ──────────────────────────────
+                if de_api != "All":
+                    st.divider()
+                    section_label("EXPORT TO S3 / ADLS")
+
+                    try:
+                        existing_exports = run_query(
+                            f"SELECT * FROM {META}.EXPORT_CONFIGS WHERE API_NAME = ? AND ACTIVE_FLAG = TRUE",
+                            params=[de_api]
+                        )
+                    except Exception:
+                        existing_exports = pd.DataFrame()
+
+                    if not existing_exports.empty:
+                        for _, exp_row in existing_exports.iterrows():
+                            last_exp = str(exp_row.get("LAST_EXPORT_UTC") or "never")[:16]
+                            cfg_card(
+                                name=exp_row.get("EXPORT_NAME", "—"),
+                                endpoint=f"@{exp_row.get('STAGE_NAME', '')} / {exp_row.get('EXPORT_PATH', '')}",
+                                badges=[
+                                    {"text": exp_row.get("EXPORT_FORMAT", "PARQUET"), "cls": "accent"},
+                                    {"text": exp_row.get("LOAD_MODE", "INCREMENTAL"), "cls": "accent"},
+                                    {"text": f"last: {last_exp}", "cls": ""},
+                                ],
+                                meta=f"path: {exp_row.get('EXPORT_PATH', '')}",
+                                status="healthy",
+                            )
+                            er_a1, er_a2 = st.columns([1, 5])
+                            with er_a1:
+                                with st.popover("🗑 Remove", use_container_width=True):
+                                    st.warning(f"Remove '{exp_row.get('EXPORT_NAME')}'?")
+                                    if st.button("Confirm", key=f"de_del_exp_{exp_row.get('EXPORT_ID')}", type="primary"):
+                                        exec_sql(f"UPDATE {META}.EXPORT_CONFIGS SET ACTIVE_FLAG = FALSE WHERE EXPORT_ID = ?",
+                                                 params=[int(exp_row.get("EXPORT_ID"))])
+                                        st.toast("Export removed", icon="🗑")
+                                        st.rerun()
+
+                    with st.expander("＋ Add Export Destination", expanded=existing_exports.empty):
+                        ed_c1, ed_c2 = st.columns(2)
+                        with ed_c1:
+                            exp_name = st.text_input("Export Name", value=f"{de_api}_S3_EXPORT", key=f"de_exp_name_{de_api}")
+                            try:
+                                stages_df = run_query("SHOW STAGES IN DATABASE API_DATA_PIPELINE")
+                                stages_df.columns = [c.upper() for c in stages_df.columns]
+                                stage_opts = [f"{r['DATABASE_NAME']}.{r['SCHEMA_NAME']}.{r['NAME']}"
+                                              for _, r in stages_df.iterrows()] if not stages_df.empty else []
+                            except Exception:
+                                stage_opts = ["API_DATA_PIPELINE.PUBLIC.STG_S3_EXPORTS"]
+                            stage_name = st.selectbox("Target Stage", stage_opts, key=f"de_exp_stage_{de_api}")
+                            export_path = st.text_input("Path Prefix", value=f"{de_api.lower().replace('_','-')}/", key=f"de_exp_path_{de_api}")
+                        with ed_c2:
+                            exp_format = st.selectbox("Format", ["PARQUET", "CSV", "JSON"], key=f"de_exp_fmt_{de_api}")
+                            load_mode = st.selectbox("Load Mode", ["INCREMENTAL", "FULL", "SNAPSHOT"], key=f"de_exp_mode_{de_api}")
+                            partition_by = st.checkbox("Partition by date", value=True, key=f"de_exp_part_{de_api}")
+                            max_file_mb = st.select_slider("Max file size", options=[64, 128, 256, 512, 1024], value=256,
+                                                           format_func=lambda x: f"{x} MB", key=f"de_exp_maxfile_{de_api}")
+
+                        flatten_mode = st.radio("Fields to export",
+                                                ["All fields (full VARIANT)", "Selected fields (flattened)"],
+                                                key=f"de_exp_flatten_{de_api}")
+                        exp_flatten_json = None
+                        if "Selected fields" in flatten_mode:
+                            if selected_fields:
+                                st.info(f"✓ Using the **{len(selected_fields)} fields** selected above in Field Selection.")
+                                exp_flatten_json = json.dumps([f["PATH"] for f in selected_fields])
+                            else:
+                                st.warning("No fields selected above. Tick fields in Field Selection first.")
+
+                        if st.button("💾 Save Export Config", type="primary", key=f"de_save_exp_{de_api}",
+                                     disabled=not (exp_name and stage_name and export_path)):
+                            try:
+                                exec_sql(
+                                    f"INSERT INTO {META}.EXPORT_CONFIGS "
+                                    "(API_NAME, EXPORT_NAME, STAGE_NAME, EXPORT_PATH, EXPORT_FORMAT, "
+                                    " LOAD_MODE, PARTITION_BY_DATE, MAX_FILE_SIZE_MB, FLATTEN_FIELDS, RECORDS_PATH, ACTIVE_FLAG) "
+                                    "SELECT ?, ?, ?, ?, ?, ?, ?, ?, TRY_PARSE_JSON(?), ?, TRUE",
+                                    params=[de_api, exp_name, stage_name, export_path, exp_format,
+                                            load_mode, bool(partition_by), max_file_mb, exp_flatten_json,
+                                            st.session_state.get("ds_schema_records_path", "data")]
+                                )
+                                exec_sql(f"UPDATE {META}.INGESTION_CONFIGS SET EXPORT_ENABLED = TRUE WHERE API_NAME = ?",
+                                         params=[de_api])
+                                st.toast(f"Export config '{exp_name}' saved — runs after each ingestion", icon="📤")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(str(e))

@@ -817,6 +817,140 @@ def render() -> None:
 
             st.divider()
 
+            section_label("EXPORT CONFIGURATION")
+            current_export = bool(row.get("EXPORT_ENABLED", False)) if "EXPORT_ENABLED" in row.index else False
+            export_enabled = st.toggle(
+                "Enable automatic export to S3/ADLS after each ingestion",
+                value=current_export,
+                key=f"export_toggle_{selected_api}",
+            )
+            if export_enabled != current_export:
+                try:
+                    exec_sql(
+                        f"UPDATE {META}.INGESTION_CONFIGS SET EXPORT_ENABLED = ? WHERE API_NAME = ?",
+                        params=[bool(export_enabled), selected_api]
+                    )
+                    st.toast(f"Export {'enabled' if export_enabled else 'disabled'} for '{selected_api}'", icon="📤")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+            if export_enabled:
+                try:
+                    exp_df = run_query(
+                        f"SELECT * FROM {META}.EXPORT_CONFIGS WHERE API_NAME = ? ORDER BY EXPORT_ID",
+                        params=[selected_api]
+                    )
+                except Exception:
+                    exp_df = pd.DataFrame()
+
+                if not exp_df.empty:
+                    for _, exp_row in exp_df.iterrows():
+                        e_status = "healthy" if exp_row.get("ACTIVE_FLAG") else "inactive"
+                        last_exp = str(exp_row.get("LAST_EXPORT_UTC") or "never")[:16]
+                        cfg_card(
+                            name=exp_row.get("EXPORT_NAME", "—"),
+                            endpoint=f"@{exp_row.get('STAGE_NAME', '')} / {exp_row.get('EXPORT_PATH', '')}",
+                            badges=[
+                                {"text": exp_row.get("EXPORT_FORMAT", "PARQUET"), "cls": "accent"},
+                                {"text": exp_row.get("LOAD_MODE", "INCREMENTAL"), "cls": "accent"},
+                                {"text": f"last: {last_exp}", "cls": ""},
+                            ],
+                            meta=f"path prefix: {exp_row.get('EXPORT_PATH', '')}",
+                            status=e_status,
+                        )
+                        ex_a1, ex_a2 = st.columns([1, 5])
+                        with ex_a1:
+                            with st.popover("🗑 Delete", use_container_width=True):
+                                st.warning(f"Delete export '{exp_row.get('EXPORT_NAME')}'?")
+                                if st.button("Confirm", key=f"exp_del_{exp_row.get('EXPORT_ID')}", type="primary"):
+                                    exec_sql(
+                                        f"DELETE FROM {META}.EXPORT_CONFIGS WHERE EXPORT_ID = ?",
+                                        params=[int(exp_row.get("EXPORT_ID"))]
+                                    )
+                                    st.toast("Export config deleted", icon="🗑")
+                                    st.rerun()
+
+                with st.expander("＋ Add Export Destination", expanded=exp_df.empty):
+                    ex_c1, ex_c2 = st.columns(2)
+                    with ex_c1:
+                        exp_name = st.text_input("Export Name", placeholder=f"{selected_api}_S3", key=f"exp_name_{selected_api}")
+                        try:
+                            stages_df = run_query("SHOW STAGES IN DATABASE API_DATA_PIPELINE")
+                            stages_df.columns = [c.upper() for c in stages_df.columns]
+                            stage_opts = [f"{r['DATABASE_NAME']}.{r['SCHEMA_NAME']}.{r['NAME']}"
+                                          for _, r in stages_df.iterrows()] if not stages_df.empty else []
+                        except Exception:
+                            stage_opts = ["API_DATA_PIPELINE.PUBLIC.STG_S3_EXPORTS"]
+                        stage_name = st.selectbox("Target Stage", stage_opts, key=f"exp_stage_{selected_api}",
+                                                  help="S3/ADLS external stage")
+                        export_path = st.text_input("Export Path Prefix", value=f"{selected_api.lower()}/",
+                                                    key=f"exp_path_{selected_api}")
+                    with ex_c2:
+                        exp_format = st.selectbox("File Format", ["PARQUET", "CSV", "JSON"], key=f"exp_fmt_{selected_api}")
+                        load_mode = st.selectbox("Load Mode", ["INCREMENTAL", "FULL", "SNAPSHOT"], key=f"exp_mode_{selected_api}",
+                                                 help="INCREMENTAL=current run only · FULL=whole table · SNAPSHOT=full+per-run folder")
+                        partition_by = st.checkbox("Partition by date (YYYY/MM/DD/)", value=True, key=f"exp_part_{selected_api}")
+                        max_file_mb = st.number_input("Max file size (MB)", value=256, min_value=16, max_value=5120, key=f"exp_maxfile_{selected_api}")
+
+                    flatten_mode = st.radio("Fields to export", ["All fields (full VARIANT)", "Selected fields (flattened)"],
+                                            horizontal=True, key=f"exp_field_mode_{selected_api}")
+                    flatten_fields_json = None
+                    if flatten_mode == "Selected fields (flattened)":
+                        raw_fields = st.text_area("Field paths (one per line)",
+                                                  placeholder="id\nname\nauthor.login\ncommit.message",
+                                                  key=f"exp_raw_fields_{selected_api}")
+                        if raw_fields:
+                            flatten_fields_json = json.dumps([f.strip() for f in raw_fields.splitlines() if f.strip()])
+
+                    if st.button("Save Export Config", type="primary", key=f"save_exp_{selected_api}",
+                                 disabled=not (exp_name and stage_name and export_path)):
+                        try:
+                            exec_sql(
+                                f"INSERT INTO {META}.EXPORT_CONFIGS "
+                                "(API_NAME, EXPORT_NAME, STAGE_NAME, EXPORT_PATH, EXPORT_FORMAT, "
+                                " LOAD_MODE, PARTITION_BY_DATE, MAX_FILE_SIZE_MB, FLATTEN_FIELDS, ACTIVE_FLAG) "
+                                "SELECT ?, ?, ?, ?, ?, ?, ?, ?, TRY_PARSE_JSON(?), TRUE",
+                                params=[selected_api, exp_name, stage_name, export_path, exp_format,
+                                        load_mode, bool(partition_by), max_file_mb, flatten_fields_json]
+                            )
+                            st.toast(f"Export config '{exp_name}' saved", icon="📤")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+
+                if not exp_df.empty:
+                    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+                    section_label("MANUAL EXPORT")
+                    me_c1, me_c2 = st.columns(2)
+                    with me_c1:
+                        manual_mode = st.selectbox("Export mode", ["INCREMENTAL (latest run)", "FULL LOAD"],
+                                                   key=f"manual_exp_mode_{selected_api}")
+                    with me_c2:
+                        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+                        if st.button("▶ Run Export Now", type="primary", use_container_width=True, key=f"run_exp_{selected_api}"):
+                            with st.spinner("Exporting..."):
+                                try:
+                                    if "INCREMENTAL" in manual_mode:
+                                        latest = run_query(
+                                            f"SELECT RUN_ID FROM {META}.INGESTION_RUN_SUMMARY "
+                                            f"WHERE API_NAME = ? AND STATUS = 'SUCCESS' "
+                                            f"ORDER BY RUN_START_UTC DESC LIMIT 1",
+                                            params=[selected_api]
+                                        )
+                                        latest_run = latest["RUN_ID"].iloc[0] if not latest.empty else None
+                                    else:
+                                        latest_run = None
+                                    result = run_query(
+                                        f"CALL {META}.USP_EXPORT_TO_STAGE(?, ?, NULL)",
+                                        params=[selected_api, latest_run]
+                                    )
+                                    st.success(result.iloc[0, 0])
+                                except Exception as e:
+                                    st.error(str(e))
+
+            st.divider()
+
             section_label("DANGER ZONE")
             st.markdown("""
             <style>
